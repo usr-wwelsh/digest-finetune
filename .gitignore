@@ -1,5 +1,5 @@
 .venv/
 checkpoints/
-data/
+data/*.bak
 *.log
 __pycache__/

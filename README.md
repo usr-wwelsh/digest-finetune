@@ -1,6 +1,6 @@
 # digest-finetune
 
-Distill the Claude-written daily digests from [git-digest](../git-digest) into
+Distill the Claude-written daily digests from [git-digest](https://github.com/usr-wwelsh/git-digest) into
 [SmolLM2-135M-Instruct](https://huggingface.co/HuggingFaceTB/SmolLM2-135M-Instruct)
 so digest writing runs offline on CPU — eventually bundled into git-digest itself.
 
