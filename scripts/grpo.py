@@ -40,15 +40,18 @@ def main() -> None:
     ])
 
     def digest_reward(completions, activity=None, **kw):
-        act = json.loads(activity) if isinstance(activity, str) else activity
         scores = []
-        for c in completions:
+        for c, a in zip(completions, activity):
             text = c[-1]["content"] if isinstance(c, list) else c
+            act = json.loads(a) if isinstance(a, str) else a
             scores.append(score_digest(text, act)["total"])
         return scores
 
+    cuda = torch.cuda.is_available()
     tok = AutoTokenizer.from_pretrained(args.model)
-    model = AutoModelForCausalLM.from_pretrained(args.model, dtype=torch.float32)
+    model = AutoModelForCausalLM.from_pretrained(
+        args.model, dtype=torch.bfloat16 if cuda else torch.float32
+    )
     cfg = GRPOConfig(
         output_dir=str(args.out),
         max_steps=args.steps,
@@ -65,7 +68,7 @@ def main() -> None:
         save_strategy="steps",
         save_steps=10,
         save_total_limit=4,
-        bf16=False,
+        bf16=cuda,
         report_to=[],
         seed=0,
         use_vllm=False,
