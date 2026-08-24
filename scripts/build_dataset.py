@@ -9,7 +9,8 @@ from digest_format import include_patches
 INSTRUCTION = (
     "Write a developer journal entry in markdown with:\n"
     "1. `## Summary` — what shipped, what you were deep in, anything notable across repos\n"
-    "2. `## Per-Repo Activity` — one `### repo` subsection per repo, 1-2 sentences each\n"
+    "2. `## Per-Repo Activity` — one `### repo` subsection per repo, 1-2 sentences each. "
+    "Use just the repo name, not the owner/repo path (e.g. `### turbolab`, not `### usr-wwelsh/turbolab`).\n"
     "Tone: retrospective and observational, like a code blog post. "
     "No 'next steps', no 'you should'. Just what happened and why it matters.\n"
     "Ground every claim in the commit messages and diffs above. "
@@ -19,14 +20,20 @@ INSTRUCTION = (
 NAME_RE = re.compile(r"^(\d{4}-\d{2}-\d{2})-(\d+)d\.md$")
 
 
-def extract_target(md: str) -> str:
+def extract_target(md: str, username: str = "usr-wwelsh") -> str:
     idx = md.find("# Developer Journal")
     if idx == -1:
         m = re.search(r"^## Summary", md, re.MULTILINE)
         if not m:
             raise ValueError("no digest body found")
         idx = m.start()
-    return md[idx:].strip()
+    body = md[idx:].strip()
+    # older digests headered repo sections as "### owner/repo"; newer ones as "### repo" --
+    # normalize to bare repo name so training labels don't teach an ambiguous convention
+    body = re.sub(rf"^### {re.escape(username)}/", "### ", body, flags=re.MULTILINE)
+    # some older digests end in a stray unmatched ``` fence left over from how they were
+    # originally rendered -- strip it so labels don't teach the model to emit one
+    return re.sub(r"\n```\s*$", "", body)
 
 
 def build_prompt(date: str, lookback: int, username: str, activity: dict) -> str:
@@ -66,7 +73,7 @@ def load_pair(md_path: Path, username: str = "usr-wwelsh") -> dict | None:
         return None
     try:
         activity = json.loads(json_path.read_text())
-        completion = extract_target(md_path.read_text())
+        completion = extract_target(md_path.read_text(), username)
     except (ValueError, json.JSONDecodeError) as e:
         print(f"skip {md_path.name}: {e}", file=sys.stderr)
         return None
