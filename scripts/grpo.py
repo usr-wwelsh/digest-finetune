@@ -10,6 +10,39 @@ from trl import GRPOConfig, GRPOTrainer
 from reward import score_digest
 
 
+def abort_reason(history: list[dict], patience: int = 3, min_train_gain: float = 0.05,
+                 length_floor: float = 0.5, trunc_ceiling: float = 0.5) -> str | None:
+    """Why this run should stop, or None to keep going.
+
+    GRPO against a lexical reward fails in ways the reward itself cannot see, so these
+    all read the held-out spotcheck rather than the training score. Judged only over the
+    last `patience` ticks, so a run that stalls and then recovers isn't held to it."""
+    if len(history) < patience:
+        return None
+    win = history[-patience:]
+
+    train_gain = win[-1]["train_reward"] - win[0]["train_reward"]
+    heldout_gain = win[-1]["spotcheck_total"] - win[0]["spotcheck_total"]
+    if train_gain >= min_train_gain and heldout_gain <= 0:
+        return (f"train reward +{train_gain:.3f} while held-out spotcheck "
+                f"{heldout_gain:+.3f} over {patience} checks -- fitting the scorer, not the task")
+
+    # peak-relative and averaged: spotcheck cycles held-out days, so one quiet day is
+    # legitimately short and only a sustained drop from the best seen counts
+    peak = max(h["tokens"] for h in history)
+    mean_tokens = sum(h["tokens"] for h in win) / patience
+    if peak and mean_tokens < length_floor * peak:
+        return (f"completion length collapsed: mean {mean_tokens:.0f} tokens over "
+                f"{patience} checks vs peak {peak}")
+
+    mean_trunc = sum(h["truncated_rate"] for h in win) / patience
+    if mean_trunc > trunc_ceiling:
+        return (f"{mean_trunc:.0%} of rollouts truncated at max_completion over "
+                f"{patience} checks -- raise --max-completion or the reward is rewarding rambling")
+
+    return None
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", default=Path(__file__).parent.parent / "checkpoints/sft2")
@@ -20,12 +53,15 @@ def main() -> None:
     ap.add_argument("--prompts-per-step", type=int, default=2)
     ap.add_argument("--max-completion", type=int, default=768)
     ap.add_argument("--temperature", type=float, default=0.8)
-    ap.add_argument("--beta", type=float, default=0.05)
+    ap.add_argument("--beta", type=float, default=0.1,
+                    help="KL penalty toward the SFT policy; the reward is gameable, so drift is the risk")
     ap.add_argument("--steps", type=int, default=60)
     ap.add_argument("--threads", type=int, default=6)
     ap.add_argument("--limit", type=int, default=0, help="use only N prompts (smoke test)")
     ap.add_argument("--spotcheck-every", type=int, default=20,
                     help="generate+score one held-out eval day every N steps (0=off)")
+    ap.add_argument("--abort-patience", type=int, default=3,
+                    help="spotchecks the divergence guard judges over (0=never abort)")
     args = ap.parse_args()
 
     torch.set_num_threads(args.threads)
@@ -40,6 +76,9 @@ def main() -> None:
         }
         for r in rows
     ])
+
+    # drained by the Spotcheck callback to pair training-side stats with each held-out check
+    batch_stats: list[tuple[float, float]] = []
 
     def digest_reward(completions, activity=None, completion_ids=None, log_metric=None, **kw):
         scores = []
@@ -60,6 +99,8 @@ def main() -> None:
         if log_metric is not None:
             for k, v in comps.items():
                 log_metric(k, sum(v) / len(v))
+        batch_stats.append((sum(scores) / len(scores),
+                            sum(comps["truncated"]) / len(comps["truncated"])))
         return scores
 
     eval_rows = []
@@ -72,6 +113,7 @@ def main() -> None:
             self.tok = tok
             self.i = 0
             self.pending = {}
+            self.history: list[dict] = []
 
         def on_step_end(self, targs, state, control, model=None, **kw):
             last = state.global_step >= state.max_steps
@@ -99,6 +141,24 @@ def main() -> None:
             print("  " + text[:200].replace("\n", " "))
             model.train(was_training)
             self.pending = {f"spotcheck/{k}": v for k, v in s.items()}
+
+            if not args.abort_patience:
+                return
+            seen, batch_stats[:] = list(batch_stats), []
+            if not seen:
+                return
+            self.history.append({
+                "step": state.global_step,
+                "train_reward": sum(r for r, _ in seen) / len(seen),
+                "spotcheck_total": s["total"],
+                "tokens": n_new,
+                "truncated_rate": sum(t for _, t in seen) / len(seen),
+            })
+            why = abort_reason(self.history, patience=args.abort_patience)
+            if why:
+                print(f"\n[abort @ step {state.global_step}] {why}\n"
+                      f"  stopping early -- last good checkpoint is in {args.out}")
+                control.should_training_stop = True
 
         def on_log(self, targs, state, control, logs=None, **kw):
             if self.pending and logs is not None:
