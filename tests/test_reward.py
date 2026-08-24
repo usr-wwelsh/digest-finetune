@@ -245,7 +245,7 @@ def test_small_similar_sections_on_big_day_not_nuked():
         for i, me in enumerate(["me"] * 6)
     }
     lines = ["# Developer Journal", "", "## Summary", "",
-             "Quiet day across six repositories with only documentation housekeeping landed.", "",
+             "Readme badge work dominated a quiet day of docs upkeep across six repositories.", "",
              "## Per-Repo Activity"]
     for i in range(6):
         lines += ["", f"### usr-wwelsh/repo{i}", "", "Readme badge documentation touched briefly."]
@@ -324,6 +324,124 @@ def test_known_dependency_name_not_penalized():
         "Turbolab cleaned up build warnings in App.svelte and fixed systemd absolute path handling in setup.go.",
         "Turbolab cleaned up a llama.cpp memory leak and fixed systemd absolute path handling in setup.go.")
     assert score_digest(dep, FILES_ACTIVITY)["penalties"] == 0.0
+
+
+def test_fabricated_filename_in_summary_penalized():
+    # same exploit as the body case but hidden in the summary, which penalties()
+    # used to never scan -- a hallucinated specific detail cost nothing there
+    padded = FILES_GOOD.replace(
+        "Turbolab cleaned up build warnings in App.svelte and fixed systemd absolute path handling in setup.go.",
+        "Turbolab cleaned up build warnings in App.svelte and Widget.svelte, and fixed systemd "
+        "absolute path handling in setup.go.")
+    good_score = score_digest(FILES_GOOD, FILES_ACTIVITY)
+    bad_score = score_digest(padded, FILES_ACTIVITY)
+    assert bad_score["penalties"] > good_score["penalties"]
+    assert bad_score["total"] < good_score["total"]
+
+
+def test_ungrounded_summary_scores_below_grounded_summary():
+    # the summary is 1/3 of format score; swapping it for fluent-but-unrelated
+    # prose used to leave the total untouched -- free fabrication channel
+    swapped = FILES_GOOD.replace(
+        "Turbolab cleaned up build warnings in App.svelte and fixed systemd absolute path handling in setup.go.",
+        "A productive day of refactoring across the board with meaningful progress on "
+        "infrastructure and several quality-of-life improvements landing safely.")
+    good_score = score_digest(FILES_GOOD, FILES_ACTIVITY)
+    bad_score = score_digest(swapped, FILES_ACTIVITY)
+    assert bad_score["format"] < good_score["format"]
+    assert bad_score["total"] < good_score["total"]
+
+
+def test_grounded_terse_summary_still_passes_format():
+    # grounding the summary must not punish legitimate short-hand phrasing
+    terse = FILES_GOOD.replace(
+        "Turbolab cleaned up build warnings in App.svelte and fixed systemd absolute path handling in setup.go.",
+        "Build warnings cleanup in App.svelte plus a systemd path fix in setup.go.")
+    assert score_digest(terse, FILES_ACTIVITY)["format"] == 1.0
+
+
+def test_orphan_prose_under_per_repo_header_penalized():
+    # text sitting between "## Per-Repo Activity" and the first "###" header used to
+    # be invisible to every scorer -- neither summary nor section, free hallucination space
+    stray = FILES_GOOD.replace(
+        "## Per-Repo Activity\n",
+        "## Per-Repo Activity\n\nUnverified claims about src/app/Ghost.svelte appeared from nowhere.\n")
+    good = score_digest(FILES_GOOD, FILES_ACTIVITY)
+    bad = score_digest(stray, FILES_ACTIVITY)
+    assert bad["total"] < good["total"]
+    assert bad["penalties"] > 0
+
+
+def test_blank_space_under_per_repo_header_not_penalized():
+    spaced = FILES_GOOD.replace("## Per-Repo Activity\n", "## Per-Repo Activity\n\n\n")
+    assert score_digest(spaced, FILES_ACTIVITY)["penalties"] == 0.0
+
+
+def test_degenerate_activity_does_not_crash():
+    for activity in (
+        {"a/b": {"commits": [{}]}},
+        {"a/b": {"commits": [{"sha": "1", "message": "ok", "files": [{}]}]}},
+    ):
+        s = score_digest("### a/b\n\nSome prose about things.\n", activity)
+        assert 0.0 <= s["total"] <= 1.0
+
+
+def test_two_keyword_accident_earns_only_partial_coverage():
+    # a body whose ONLY tie to the repo is two generic words that happen to appear
+    # in its commits ("cleanup", "scroll") used to pass the binary gate at full
+    # credit -- exactly the gradient GRPO climbs. It must earn partial credit at most
+    lucky = GOOD.replace(
+        "Removed build warnings and switched systemd unit resolution to absolute paths.",
+        "Cleanup and scroll work landed.").replace(
+        "Added a sitemap generator feature.",
+        "Cleanup and scroll efforts continued.")
+    solo = {"usr-wwelsh/turbolab": {"commits": [
+        {"sha": "1", "message": "chore: cleanup scroll handling"}]}}
+    s = score_digest(lucky, solo)
+    assert s["coverage"] < 1.0
+
+
+def test_grounded_prose_still_full_coverage():
+    assert score_digest(GOOD, ACTIVITY)["coverage"] == 1.0
+
+
+def test_omitting_weak_section_cannot_raise_total():
+    # grounding averaged over *present* sections only, so deleting a section with
+    # no coverage credit but a low grounding hit RAISED the total (+0.038 on a real
+    # synthetic day) -- hiding a repo you can't write about must never pay
+    three = dict(ACTIVITY)
+    three["usr-wwelsh/kickdrummer"] = {"commits": [
+        {"sha": "9", "message": "feat: midi drum transcription pipeline"}]}
+    full = GOOD.replace(
+        "## Per-Repo Activity\n",
+        """## Per-Repo Activity
+
+### usr-wwelsh/kickdrummer
+
+Sequencer groundwork and refactor momentum.
+""")
+    without_it = GOOD  # kickdrummer section simply absent
+    assert score_digest(without_it, three)["total"] <= score_digest(full, three)["total"]
+    assert score_digest(without_it, three)["grounding"] <= score_digest(full, three)["grounding"]
+
+
+def test_missing_section_zeroes_grounding_for_that_repo():
+    solo = {"a/b": {"commits": [{"sha": "1", "message": "alpha beta gamma delta"}]}}
+    half = """# Journal
+
+## Summary
+
+Alpha beta work happened today alongside other things worth noting here.
+
+## Per-Repo Activity
+
+### b
+
+Alpha beta gamma delta epsilon prose.
+"""
+    s = score_digest(half, {"a/b": solo["a/b"], "c/d": solo["a/b"]})
+    # c/d has no section at all -- grounding must reflect that as a 0, not skip it
+    assert s["grounding"] <= 0.55
 
 
 def test_filename_from_commit_message_not_penalized():

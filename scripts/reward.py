@@ -41,8 +41,10 @@ def real_filenames(activity: dict) -> set[str]:
     for data in activity.values():
         for c in data.get("commits", []):
             for f in c.get("files", []):
-                names.add(f["filename"].strip().lower().split("/")[-1])
-            for m in FILE_MENTION_RE.finditer(c["message"]):
+                name = f.get("filename", "")
+                if name:
+                    names.add(name.strip().lower().split("/")[-1])
+            for m in FILE_MENTION_RE.finditer(c.get("message", "")):
                 if m.group(1).lower() in CODE_EXTENSIONS:
                     names.add(m.group(0).lower().split("/")[-1])
     return names
@@ -73,14 +75,23 @@ def content_tokens(text: str) -> set[str]:
 
 
 def parse_sections(digest: str) -> tuple[str, list[tuple[str, str]]]:
+    """Returns (summary, sections). Prose under "## Per-Repo Activity" before the first
+    "###" header becomes a pseudo-section named "" so it can't hide from scoring -- it
+    fails header_precision, trips the excess-header penalty, and its body is scanned
+    for fabricated files like any other."""
     summary_lines: list[str] = []
     sections: list[tuple[str, str]] = []
     mode = ""
+    seen_per_repo = False
+    orphan: list[str] = []
     cur_name, cur_body = "", []
     for line in digest.splitlines():
         if line.startswith("### "):
             if cur_name:
                 sections.append((cur_name, "\n".join(cur_body).strip()))
+            elif orphan:
+                sections.append(("", "\n".join(orphan).strip()))
+                orphan = []
             cur_name, cur_body = line[4:].strip(), []
             mode = "repo"
         elif line.startswith("## "):
@@ -89,12 +100,18 @@ def parse_sections(digest: str) -> tuple[str, list[tuple[str, str]]]:
                 cur_name, cur_body = "", []
             title = line[3:].strip().lower()
             mode = "summary" if title == "summary" else ""
+            seen_per_repo = title == "per-repo activity"
+            orphan = []
         elif mode == "summary":
             summary_lines.append(line)
         elif mode == "repo":
             cur_body.append(line)
+        elif seen_per_repo and line.strip():
+            orphan.append(line)
     if cur_name:
         sections.append((cur_name, "\n".join(cur_body).strip()))
+    elif orphan:
+        sections.append(("", "\n".join(orphan).strip()))
     return "\n".join(summary_lines).strip(), sections
 
 
@@ -111,37 +128,47 @@ def source_tokens(activity: dict, repo: str) -> set[str]:
     show_patches = include_patches(activity)
     toks = content_tokens(repo)
     for c in data.get("commits", []):
-        toks |= content_tokens(c["message"])
+        toks |= content_tokens(c.get("message", ""))
         for f in c.get("files", []):
-            if is_low_signal_file(f["filename"]):
+            fname = f.get("filename", "")
+            if not fname or is_low_signal_file(fname):
                 continue
-            toks |= content_tokens(f["filename"])
+            toks |= content_tokens(fname)
             if show_patches:
                 toks |= content_tokens(f.get("patch", ""))
     return toks
 
 
-def format_score(digest: str, repos: list[str]) -> float:
+def format_score(digest: str, repos: list[str], activity: dict) -> float:
+    """The summary gate checks groundedness too: a fluent-but-unrelated summary is the
+    cheapest fabrication channel in the format (never verified otherwise), so require
+    content traceable to ANY repo's own prompt material."""
     summary, sections = parse_sections(digest)
     allowed = {norm_repo(r) for r in repos}
     headers = [norm_repo(n) for n, _ in sections]
     valid_headers = [h for h in headers if h in allowed]
 
-    has_summary = len(summary.split()) >= 10
+    summary_toks = content_tokens(summary)
+    any_source: set[str] = set()
+    for r in repos:
+        any_source |= source_tokens(activity, r)
+    has_summary = len(summary.split()) >= 10 and len(summary_toks & any_source) >= 2
     has_section_header = "## Per-Repo Activity" in digest
     header_precision = len(valid_headers) / len(headers) if headers else 0.0
 
     return (has_summary + has_section_header + header_precision) / 3
 
 
-def coverage_score(digest: str, activity: dict, min_tokens: int = 3, min_overlap: int = 2) -> float:
-    """A repo only counts as covered if its section has enough content AND
-    at least `min_overlap` words actually traceable to that repo's commits --
-    otherwise headers-with-filler-bodies (nonsense, copied SHAs) score as covered."""
+def coverage_score(digest: str, activity: dict, min_tokens: int = 3, target_overlap: int = 4) -> float:
+    """A repo only counts as covered if its section has enough content AND content
+    words actually traceable to that repo's commits. Credit is continuous in the
+    overlap size (saturating at `target_overlap`): a binary gate let a body built
+    from two generic words that happened to appear in commit messages ("cleanup",
+    "scroll") bank full credit -- exactly the gradient an RL run climbs."""
     repos = list(activity.keys())
     allowed = {norm_repo(r) for r in repos}
     _, sections = parse_sections(digest)
-    seen = set()
+    credit: dict[str, float] = {}
     for name, body in sections:
         rn = norm_repo(name)
         if rn not in allowed:
@@ -150,29 +177,40 @@ def coverage_score(digest: str, activity: dict, min_tokens: int = 3, min_overlap
         toks = content_tokens(body)
         if len(toks) < min_tokens:
             continue
-        if len(toks & source_tokens(activity, match)) < min_overlap:
+        ov = len(toks & source_tokens(activity, match))
+        if ov < 2:
             continue
-        seen.add(rn)
-    return len(seen & allowed) / len(allowed) if allowed else 1.0
+        # expected overlap scales with how much the body actually says: a tight
+        # 3-word paraphrase of a 1-commit repo keeps full credit, while a long
+        # hollow body can't buy saturation with two lucky generic words
+        eff = max(2, min(target_overlap, len(toks) * 3 // 4))
+        credit[rn] = max(credit.get(rn, 0.0), min(1.0, ov / eff))
+    return sum(credit.values()) / len(allowed) if allowed else 1.0
 
 
 def grounding_score(digest: str, activity: dict, target: int = 5) -> float:
-    _, sections = parse_sections(digest)
-    if not sections:
+    """Grounding averages over EVERY expected repo, not just sections present: a
+    missing (or content-free) section scores 0 for that repo. Averaging over present
+    sections only let omitting a weak section raise the mean (+0.038 total on a real
+    day) -- quiet omission must never pay."""
+    if not activity:
         return 0.0
-    hits = []
+    _, sections = parse_sections(digest)
+    hits = {norm_repo(r): 0.0 for r in activity}
     for name, body in sections:
-        match = next((r for r in activity if norm_repo(r) == norm_repo(name)), None)
-        src = source_tokens(activity, match) if match else set()
+        rn = norm_repo(name)
+        match = next((r for r in activity if norm_repo(r) == rn), None)
+        if rn not in hits:
+            continue
         toks = content_tokens(body)
-        ov = len(toks & src)
+        ov = len(toks & source_tokens(activity, match))
         hit = min(1.0, ov / target)
         # a section mostly made of source words is a copy/dump, not prose --
         # verbatim commit lists and keyword dumps otherwise max this score
         if len(toks) >= 6 and ov > 0.6 * len(toks):
             hit *= 0.5
-        hits.append(hit)
-    return sum(hits) / len(hits)
+        hits[rn] = max(hits[rn], hit)
+    return sum(hits.values()) / len(hits)
 
 
 def _jaccard(a: set[str], b: set[str]) -> float:
@@ -181,12 +219,14 @@ def _jaccard(a: set[str], b: set[str]) -> float:
     return len(a & b) / len(a | b)
 
 
-def penalties(digest: str, sections: list[tuple[str, str]], repos: list[str], activity: dict) -> float:
+def penalties(digest: str, summary: str, sections: list[tuple[str, str]], repos: list[str], activity: dict) -> float:
     low = digest.lower()
     p = sum(1 for b in BANNED if b in low) * 0.5
 
     real = real_filenames(activity)
-    fabricated = sum(fabricated_file_mentions(b, real) for _, b in sections)
+    # scan the summary too -- a hallucinated filename there used to be free
+    fabricated = fabricated_file_mentions(summary, real) \
+        + sum(fabricated_file_mentions(b, real) for _, b in sections)
     p += min(0.5, fabricated * 0.3)
 
     headers = [n for n, _ in sections]
@@ -216,11 +256,11 @@ def penalties(digest: str, sections: list[tuple[str, str]], repos: list[str], ac
 
 def score_digest(digest: str, activity: dict) -> dict:
     repos = list(activity.keys())
-    _, sections = parse_sections(digest)
-    f = format_score(digest, repos)
+    summary, sections = parse_sections(digest)
+    f = format_score(digest, repos, activity)
     c = coverage_score(digest, activity)
     g = grounding_score(digest, activity)
-    p = penalties(digest, sections, repos, activity)
+    p = penalties(digest, summary, sections, repos, activity)
     total = max(0.0, 0.30 * f + 0.45 * c + 0.25 * g - p)
     return {"format": f, "coverage": c, "grounding": round(g, 3),
             "penalties": p, "total": round(total, 3)}
