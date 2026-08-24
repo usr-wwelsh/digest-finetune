@@ -465,3 +465,65 @@ botdocs now emits sitemap.xml during the build.
 Wired sitemap.xml generation into the site builder via a baseUrl config option.
 """
     assert score_digest(digest, activity)["penalties"] == 0.0
+
+
+LOOP_FRAGMENT = "bot_created_time DATE NOT NULL, bot_created_time DATETIME NOT NULL, "
+
+
+def test_self_repeating_section_penalized():
+    # the sft3 failure: one section looping a fragment until the token cap, which
+    # scored a clean 1.0 because content_tokens() is a set and the cross-section
+    # near-dup loop never runs when there is only one section
+    looped = GOOD.replace(
+        "Added a sitemap generator feature.",
+        "Added a sitemap generator table: " + LOOP_FRAGMENT * 30)
+    s = score_digest(looped, ACTIVITY)
+    assert s["penalties"] > 0
+    assert s["total"] < score_digest(GOOD, ACTIVITY)["total"]
+
+
+def test_summary_restated_as_body_penalized():
+    # samples 1 and 3: the body near-verbatim restates the Summary, which the
+    # body-vs-body loop never compares
+    echoed = GOOD.replace(
+        "Removed build warnings and switched systemd unit resolution to absolute paths.",
+        "Turbolab cleaned up build warnings and fixed systemd absolute path handling.")
+    s = score_digest(echoed, ACTIVITY)
+    assert s["penalties"] > 0
+
+
+def test_truncated_digest_penalized():
+    assert score_digest(GOOD, ACTIVITY, truncated=True)["total"] < score_digest(GOOD, ACTIVITY)["total"]
+
+
+def test_untruncated_default_unchanged():
+    assert score_digest(GOOD, ACTIVITY, truncated=False) == score_digest(GOOD, ACTIVITY)
+
+
+def test_normal_prose_not_flagged_as_repetitive():
+    assert score_digest(GOOD, ACTIVITY)["penalties"] == 0.0
+
+
+def _digest_with_shared_run(words: int) -> str:
+    # a shared run of exactly `words` words between the summary and the one body
+    run = "the change introduces a new vector graphic asset for the launcher icon set"
+    shared = " ".join(run.split()[:words])
+    return f"""# Developer Journal
+
+## Summary
+
+Turbolab cleaned up build warnings; {shared} landed alongside the systemd path fix.
+
+## Per-Repo Activity
+
+### usr-wwelsh/turbolab
+
+Absolute paths now resolve for systemd. {shared} shipped across the same batch.
+"""
+
+
+def test_summary_echo_boundary():
+    # real teacher digests reach a 9-word shared run legitimately; the sft3 echoes
+    # ran 31, 28 and 10. One word of margin, so pin both sides.
+    assert score_digest(_digest_with_shared_run(9), ACTIVITY)["penalties"] == 0.0
+    assert score_digest(_digest_with_shared_run(10), ACTIVITY)["penalties"] > 0

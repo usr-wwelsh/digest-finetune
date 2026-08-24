@@ -50,7 +50,7 @@ def main() -> None:
             )
         text = tok.decode(out[0, input_ids.shape[1]:], skip_special_tokens=True)
         truncated = out.shape[1] - input_ids.shape[1] >= args.max_new_tokens
-        score = score_digest(text, row["activity"])
+        score = score_digest(text, row["activity"], truncated=truncated)
         totals.append(score["total"])
         print(f"=== sample {i} (truncated={truncated}, len={out.shape[1] - input_ids.shape[1]}) ===")
         print(json.dumps(score, indent=2))

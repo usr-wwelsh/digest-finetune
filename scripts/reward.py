@@ -219,6 +219,32 @@ def _jaccard(a: set[str], b: set[str]) -> float:
     return len(a & b) / len(a | b)
 
 
+def _repetition_ratio(text: str) -> float:
+    """Distinct word trigrams over total. 1.0 is ordinary prose, near 0 is a loop.
+    content_tokens() is a set, so a body that repeats one fragment until the token
+    cap used to look identical to a terse one -- this is the only signal that sees
+    the repetition. Real digests bottom out at 0.977; a looped body scores ~0.05."""
+    words = WORD_RE.findall(text.lower())
+    if len(words) < 12:
+        return 1.0
+    grams = [tuple(words[i:i + 3]) for i in range(len(words) - 2)]
+    return len(set(grams)) / len(grams)
+
+
+def _shares_long_span(a: str, b: str, n: int = 10) -> bool:
+    """True if a and b share a run of n words. Reworded prose does not.
+
+    n=10 is measured, not guessed: across the 109 real rows the longest shared
+    summary/body run is 9 words (2026-08-14-synth5), while the sft3 echoes run
+    31, 28, and 10. The margin is one word, so test_summary_echo_boundary pins
+    both sides -- widening this rule starts penalising real teacher digests."""
+    wa, wb = WORD_RE.findall(a.lower()), WORD_RE.findall(b.lower())
+    if len(wa) < n or len(wb) < n:
+        return False
+    grams = {tuple(wa[i:i + n]) for i in range(len(wa) - n + 1)}
+    return any(tuple(wb[i:i + n]) in grams for i in range(len(wb) - n + 1))
+
+
 def penalties(digest: str, summary: str, sections: list[tuple[str, str]], repos: list[str], activity: dict) -> float:
     low = digest.lower()
     p = sum(1 for b in BANNED if b in low) * 0.5
@@ -251,16 +277,33 @@ def penalties(digest: str, summary: str, sections: list[tuple[str, str]], repos:
     if near_dup:
         p += 0.3
 
+    # a body that restates the summary was free while only bodies were compared
+    # pairwise. Jaccard cannot separate this: a solo-repo day legitimately rewords
+    # the summary into its one body at 0.615, barely under a copy-paste at 0.667.
+    # Verbatim span reuse is the honest signal -- rewording never keeps 8 words in
+    # a row, and copy-paste keeps whole sentences.
+    if any(_shares_long_span(summary, b) for _, b in sections):
+        p += 0.3
+
+    # charge self-repetition once, however many sections loop
+    if any(_repetition_ratio(t) < 0.5 for t in [summary] + [b for _, b in sections]):
+        p += 0.4
+
     return min(1.0, p)
 
 
-def score_digest(digest: str, activity: dict) -> dict:
+def score_digest(digest: str, activity: dict, truncated: bool = False) -> dict:
     repos = list(activity.keys())
     summary, sections = parse_sections(digest)
     f = format_score(digest, repos, activity)
     c = coverage_score(digest, activity)
     g = grounding_score(digest, activity)
     p = penalties(digest, summary, sections, repos, activity)
+    # running into the token cap means the digest never finished; callers that
+    # know the generation length pass this in, and it defaults off for scoring
+    # reference completions that were never generated
+    if truncated:
+        p = min(1.0, p + 0.5)
     total = max(0.0, 0.30 * f + 0.45 * c + 0.25 * g - p)
     return {"format": f, "coverage": c, "grounding": round(g, 3),
             "penalties": p, "total": round(total, 3)}
