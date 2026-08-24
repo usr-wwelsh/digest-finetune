@@ -114,6 +114,44 @@ so digest writing runs offline on CPU — eventually bundled into git-digest its
   per-repo gate rather than continuous — watch the GRPO spotcheck's per-component grounding
   score for drift toward short/sparse bodies as an early warning.
 
+## Reward hardening (pre-GRPO session)
+
+Before the next training run the reward went through adversarial fuzzing
+(`scripts/fuzz_reward.py`) plus teacher calibration (`scripts/calibrate_reward.py`).
+Four real holes found by mutation-testing the scorer against all 124 dataset rows:
+
+- **Summary was a free fabrication channel** — penalties never scanned it and format
+  only counted words. A hallucinated filename in the summary cost nothing (1.000 →
+  1.000); swapping the whole summary for unrelated prose cost nothing (0.875 → 0.875).
+  Fixed: summary must now trace ≥2 content tokens to the prompt's own material, and
+  fabricated-file scanning includes it.
+- **Orphan prose under `## Per-Repo Activity`** (between the header and the first
+  `###`) was invisible to every scorer — parse_sections now emits it as an unnamed
+  pseudo-section so it fails header precision, trips the excess-header penalty, and
+  gets fabricated-file-scanned.
+- **Coverage was a binary per-repo gate** — the documented residual risk ("2 real
+  keywords + filler") fired in the wild: randomized soup hit "cleanup"+"scroll"
+  (both real dominion-tracker commit words) and banked full coverage credit for a
+  total of 0.75. Coverage credit is now continuous, saturating at ~4 traced tokens,
+  scaled by body length so tight honest paraphrases keep full credit.
+- **Grounding averaged over present sections only** — dropping your weakest repo
+  section *raised* the total (+0.038 on a synthetic 6-repo day): zero-credit sections
+  cost nothing to omit while dragging the mean down. Grounding now averages over every
+  expected repo (missing section = 0), so omission can't pay. Also fixed a crash on
+  degenerate activity dicts (`commits: [{}]`) found by garbage-input property checks.
+
+Fuzzer contract: MUST_COST mutations (fabrication, duplication, truncation, hollowing)
+must each lose ≥0.02 on every row; MUST_NOT_PAY mutations (dropping/shuffling sections)
+must never gain; format-valid ungrounded soup digests must stay below a ceiling
+(max observed 0.525 vs teacher mean 0.98); garbage inputs never crash and stay in [0,1].
+
+Calibration after the fixes: teacher means **train 0.978 / eval 0.975 / synthetic
+0.939**, zero rows failing format; two known thin-source days (2026-06-03, 2026-08-15
+— merge/scaffold commits with little lexical ground truth) sit at 0.75–0.81 and are
+honest scores, not miscalibration. **Reward totals from before this session are not
+comparable** (formula changed) — sft2's 0.499 baseline and older eval logs don't carry
+over; re-baseline any model against the new scorer before comparing.
+
 ## Weights
 
 - [usr-wwelsh/digest-sft2](https://huggingface.co/usr-wwelsh/digest-sft2) — SFT checkpoint, mean reward
@@ -130,6 +168,8 @@ so digest writing runs offline on CPU — eventually bundled into git-digest its
       and fixed a crash (`save_safetensors` invalid for installed `trl==1.10.0`)
 - [x] Backfill file stats + patches into the dataset, rebuild prompts to match production,
       make `reward.py` diff-aware (see Known issues)
+- [x] Fuzz the reward (mutation + property tiers) and calibrate against teacher completions;
+      fixed 4 holes found (summary fabrication, orphan prose, binary coverage, omission-paid)
 - [ ] Run `colab/digest_sft_colab.ipynb` — SFT on the diff-aware dataset, reward-based
       checkpoint selection against both the untrained base and old `sft2`, push as `digest-sft3`
       only if it wins
@@ -147,6 +187,8 @@ uv pip install --python .venv/bin/python transformers trl datasets accelerate py
 .venv/bin/python scripts/build_dataset.py          # rebuild data/ from portfolio/digests
 .venv/bin/python scripts/augment_dataset.py --n 18 # synthetic long-window examples (real teacher calls)
 .venv/bin/python -m pytest tests/ -q               # unit tests (parser + rewards)
+.venv/bin/python scripts/fuzz_reward.py            # adversarial fuzz: degradations must drop the score, garbage must not crash
+.venv/bin/python scripts/calibrate_reward.py       # teacher completions must sit near the reward ceiling
 nohup .venv/bin/python scripts/sft.py --save-steps 1 --save-total-limit 100 \
   --save-only-model --out checkpoints/sft2 > sft2.log 2>&1 &   # SFT, per-step checkpoints
 .venv/bin/python scripts/generate.py --model checkpoints/sft2 --file DATE-1d.md --repeat-penalty 1.08   # eyeball one day
