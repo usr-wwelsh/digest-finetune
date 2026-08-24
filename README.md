@@ -160,14 +160,21 @@ against a teacher mean of 0.978 and a fuzzer-built soup ceiling of 0.525. That m
 wide enough to train against, so the wasted runs were traced to the training scripts
 instead, and the effort moved there.
 
-**`sft.py` no longer auto-resumes.** It used to resume whenever `--out` happened to contain
-a `checkpoint-*` dir. That is what ruined the sft6 run: re-running the Colab train cell after
-an interrupt picked up a stale checkpoint, replayed the LR warmup at epoch 8.08
-(0 → 2.7e-5 → 5.3e-5 → 8e-5), and mixed the new args with the old `trainer_state.json`
-(TRL warned `save_steps: 25 (from args) != 3`). The cosine schedule never decayed below
-6.2e-5 and loss sat flat at ~2.6 with token accuracy ~0.53 for four epochs. Resuming is now
-explicit (`--resume`), and a dirty `--out` fails closed with an error naming both options
-rather than guessing — the check runs before the model loads, so it costs nothing.
+**Periodic checkpointing and reward-based checkpoint selection are both gone.** Every sweep
+so far cost 10 generations per candidate and landed on a checkpoint indistinguishable from
+the last step — the selection machinery consumed more GPU time than the training it was
+selecting from. `sft.py` and `grpo.py` now write only the final model (`save_strategy="no"`),
+and both notebooks compare exactly two things: the untrained base (or SFT baseline) against
+the trained result.
+
+That also deleted the sft6 footgun rather than guarding it. `sft.py` used to auto-resume
+whenever `--out` happened to contain a `checkpoint-*` dir, which is what ruined that run:
+re-running the Colab train cell after an interrupt picked up a stale checkpoint, replayed the
+LR warmup at epoch 8.08 (0 → 2.7e-5 → 5.3e-5 → 8e-5), and mixed the new args with the old
+`trainer_state.json` (TRL warned `save_steps: 25 (from args) != 3`). The cosine schedule never
+decayed below 6.2e-5 and loss sat flat at ~2.6 with token accuracy ~0.53 for four epochs. With
+no periodic checkpoints there is nothing to resume from and nothing to resume into, so the
+whole hazard is gone. Trade-off accepted: an interrupted run restarts from scratch.
 
 **`grpo.py` can now stop itself.** `abort_reason()` judges the last `--abort-patience`
 spotchecks (default 3) and halts the run on any of:
@@ -178,8 +185,8 @@ spotchecks (default 3) and halts the run on any of:
   since the spotcheck cycles held-out days and one quiet day is legitimately short
 - more than half of rollouts truncating at `--max-completion`
 
-Checkpoints written before an abort are kept, so checkpoint selection still has candidates.
-`--beta` also moved 0.05 → 0.1: against a lexical, gameable reward the risk is drift from the
+An aborted run still saves its policy (`save_model` runs after `train()` returns), so the
+base-vs-result comparison works either way. `--beta` also moved 0.05 → 0.1: against a lexical, gameable reward the risk is drift from the
 SFT policy, and tighter KL is cheaper insurance than another penalty term in `reward.py`.
 
 Both Colab notebooks now run `pytest`, `fuzz_reward.py`, and `calibrate_reward.py` as a CPU
@@ -223,10 +230,10 @@ uv pip install --python .venv/bin/python transformers trl datasets accelerate py
 .venv/bin/python -m pytest tests/ -q               # unit tests (parser + rewards)
 .venv/bin/python scripts/fuzz_reward.py            # adversarial fuzz: degradations must drop the score, garbage must not crash
 .venv/bin/python scripts/calibrate_reward.py       # teacher completions must sit near the reward ceiling
-nohup .venv/bin/python scripts/sft.py --save-steps 1 --save-total-limit 100 \
-  --save-only-model --out checkpoints/sft2 > sft2.log 2>&1 &   # SFT, per-step checkpoints
-# a dirty --out is refused; pass --resume (with the ORIGINAL args) to continue an interrupted run
+# SFT locally on CPU: ~12s/example at batch 1 on an i7-6700HQ (8 threads), so ~20min/epoch
+nohup .venv/bin/python scripts/sft.py --epochs 6 --lr 8e-5 --out checkpoints/sft3 > sft3.log 2>&1 &
 .venv/bin/python scripts/grpo.py --model checkpoints/sft3 --spotcheck-every 10 --abort-patience 3
+.venv/bin/python scripts/eval_reward.py --model checkpoints/sft3 --tokenizer HuggingFaceTB/SmolLM2-135M-Instruct --n 10
 .venv/bin/python scripts/generate.py --model checkpoints/sft2 --file DATE-1d.md --repeat-penalty 1.08   # eyeball one day
 .venv/bin/python scripts/generate.py --model checkpoints/sft2 --repeat-penalty 1.08 --prompt "..."       # freeform prompt
 .venv/bin/python scripts/evaluate.py --model checkpoints/sft2      # scored sweep over eval set
