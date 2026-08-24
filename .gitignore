@@ -3,3 +3,4 @@ checkpoints/
 data/*.bak
 *.log
 __pycache__/
+colab/
