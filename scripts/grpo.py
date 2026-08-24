@@ -18,7 +18,7 @@ def main() -> None:
     ap.add_argument("--lr", type=float, default=1e-5)
     ap.add_argument("--gens", type=int, default=8)
     ap.add_argument("--prompts-per-step", type=int, default=2)
-    ap.add_argument("--max-completion", type=int, default=450)
+    ap.add_argument("--max-completion", type=int, default=768)
     ap.add_argument("--temperature", type=float, default=0.8)
     ap.add_argument("--beta", type=float, default=0.05)
     ap.add_argument("--steps", type=int, default=60)
@@ -60,10 +60,12 @@ def main() -> None:
         gradient_accumulation_steps=1,
         num_generations=args.gens,
         max_completion_length=args.max_completion,
+        mask_truncated_completions=True,
         temperature=args.temperature,
         top_p=0.95,
         beta=args.beta,
         loss_type="grpo",
+        warmup_steps=5,
         logging_steps=1,
         save_strategy="steps",
         save_steps=10,

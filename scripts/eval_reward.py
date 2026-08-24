@@ -11,10 +11,10 @@ from reward import score_digest
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--model", default=Path(__file__).parent.parent / "checkpoints/sft2")
-    ap.add_argument("--data", type=Path, default=Path(__file__).parent.parent / "data/train.jsonl")
+    ap.add_argument("--data", type=Path, default=Path(__file__).parent.parent / "data/eval.jsonl")
     ap.add_argument("--n", type=int, default=5)
-    ap.add_argument("--max-new-tokens", type=int, default=450)
-    ap.add_argument("--temperature", type=float, default=0.8)
+    ap.add_argument("--max-new-tokens", type=int, default=768)
+    ap.add_argument("--temperature", type=float, default=0.0)
     args = ap.parse_args()
 
     rows = [json.loads(l) for l in args.data.read_text().splitlines()][: args.n]
@@ -41,8 +41,8 @@ def main() -> None:
             out = model.generate(
                 input_ids,
                 max_new_tokens=args.max_new_tokens,
-                do_sample=True,
-                temperature=args.temperature,
+                do_sample=args.temperature > 0,
+                temperature=max(args.temperature, 1e-5),
                 top_p=0.95,
                 pad_token_id=tok.eos_token_id,
             )
