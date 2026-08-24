@@ -97,6 +97,12 @@ def main() -> None:
             total = s["total"]
             truncated = completion_ids is not None and len(completion_ids[i]) >= args.max_completion
             if truncated:
+                # deliberately multiplicative, not score_digest(truncated=True)'s additive
+                # -0.5: that clamps at zero, so several truncated rollouts in one group all
+                # flatten to 0.0 and GRPO's group-relative advantage loses any signal telling
+                # them apart. Halving preserves their ordering. The spotcheck uses the additive
+                # form because it is scored, not optimised -- abort_reason only ever compares
+                # gains within a single series, so the two never need the same scale.
                 total *= 0.5
             comps["truncated"].append(1.0 if truncated else 0.0)
             for k in ("format", "coverage", "grounding", "penalties"):
@@ -141,9 +147,15 @@ def main() -> None:
             n_new = out.shape[1] - inputs["input_ids"].shape[1]
             text = self.tok.decode(out[0][inputs["input_ids"].shape[1]:],
                                    skip_special_tokens=True)
-            s = score_digest(text, row["activity"])
+            # the training reward already halves a truncated rollout, so scoring the
+            # spotcheck without it left the guard's own signal blind to rambling: a
+            # policy looping to the cap kept a high held-out score, which suppresses
+            # the divergence rule (train falls, held-out doesn't) and reads as maximum
+            # length rather than collapse. Only the rollout truncation rate was left.
+            truncated = n_new >= args.max_completion
+            s = score_digest(text, row["activity"], truncated=truncated)
             print(f"\n[spotcheck {row['date']}] {json.dumps(s)} tokens={n_new}"
-                  f"{' TRUNCATED' if n_new >= args.max_completion else ''}")
+                  f"{' TRUNCATED' if truncated else ''}")
             print("  " + text[:200].replace("\n", " "))
             model.train(was_training)
             self.pending = {f"spotcheck/{k}": v for k, v in s.items()}
