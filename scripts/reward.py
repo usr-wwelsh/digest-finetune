@@ -80,36 +80,44 @@ def coverage_score(digest: str, repos: list[str]) -> float:
     return len(seen & allowed) / len(allowed) if allowed else 1.0
 
 
-def grounding_score(digest: str, activity: dict) -> float:
+def grounding_score(digest: str, activity: dict, target: int = 5) -> float:
     _, sections = parse_sections(digest)
     if not sections:
         return 0.0
-    ratios = []
+    hits = []
     for name, body in sections:
         match = next((r for r in activity if norm_repo(r) == norm_repo(name)), None)
         src = source_tokens(activity, match) if match else set()
         toks = content_tokens(body)
-        if not toks:
-            ratios.append(0.0)
-            continue
-        ratios.append(len(toks & src) / len(toks))
-    return sum(ratios) / len(ratios)
+        hits.append(min(1.0, len(toks & src) / target))
+    return sum(hits) / len(hits)
 
 
-def repetition_score(digest: str) -> float:
-    sentences = [s.strip().lower() for s in re.split(r"[.!?\n]", digest)
-                 if len(s.split()) >= 4]
-    if len(sentences) < 2:
-        return 1.0
-    return len(set(sentences)) / len(sentences)
+def _jaccard(a: set[str], b: set[str]) -> float:
+    if not a or not b:
+        return 0.0
+    return len(a & b) / len(a | b)
 
 
-def penalties(digest: str, sections: list[tuple[str, str]]) -> float:
+def penalties(digest: str, sections: list[tuple[str, str]], repos: list[str]) -> float:
     low = digest.lower()
     p = sum(1 for b in BANNED if b in low) * 0.5
+
     headers = [n for n, _ in sections]
     if len(set(headers)) < len(headers):
         p += 0.5
+
+    allowed = {norm_repo(r) for r in repos}
+    excess = max(0, len(headers) - len(allowed))
+    p += min(0.5, excess * 0.15)
+
+    bodies = [content_tokens(b) for _, b in sections]
+    for i in range(len(bodies)):
+        for j in range(i + 1, len(bodies)):
+            if headers[i] != headers[j] and _jaccard(bodies[i], bodies[j]) > 0.6:
+                p += 0.3
+                break
+
     return min(1.0, p)
 
 
@@ -119,8 +127,7 @@ def score_digest(digest: str, activity: dict) -> dict:
     f = format_score(digest, repos)
     c = coverage_score(digest, repos)
     g = grounding_score(digest, activity)
-    r = repetition_score(digest)
-    p = penalties(digest, sections)
-    total = max(0.0, 0.30 * f + 0.20 * c + 0.35 * g + 0.15 * r - p)
+    p = penalties(digest, sections, repos)
+    total = max(0.0, 0.30 * f + 0.45 * c + 0.25 * g - p)
     return {"format": f, "coverage": c, "grounding": round(g, 3),
-            "repetition": round(r, 3), "penalties": p, "total": round(total, 3)}
+            "penalties": p, "total": round(total, 3)}

@@ -37,8 +37,14 @@ def test_good_digest_scores_high():
     s = score_digest(GOOD, ACTIVITY)
     assert s["format"] == 1.0
     assert s["coverage"] == 1.0
-    assert s["grounding"] > 0.5
-    assert s["total"] > 0.8
+    assert s["grounding"] >= 0.6
+    assert s["total"] > 0.85
+
+
+def test_weights_sum_to_one():
+    bad = score_digest("", ACTIVITY)
+    best_case = 0.30 * 1.0 + 0.45 * 1.0 + 0.25 * 1.0
+    assert best_case == 1.0
 
 
 def test_hallucinated_repo_detected():
@@ -49,11 +55,11 @@ def test_hallucinated_repo_detected():
     assert s["coverage"] < 1.0
 
 
-def test_hallucinated_claim_drops_grounding():
-    bad = GOOD.replace("cleaned up build warnings",
-                       "deployed quantum blockchain infrastructure")
-    s = score_digest(bad, ACTIVITY)
-    assert s["grounding"] < 0.7
+def test_hallucinated_section_claim_drops_grounding():
+    bad = GOOD.replace(
+        "Removed build warnings and switched systemd unit resolution to absolute paths.",
+        "Deployed quantum blockchain infrastructure to production.")
+    assert score_digest(bad, ACTIVITY)["grounding"] < 0.5
 
 
 def test_empty_summary_fails_format():
@@ -61,10 +67,27 @@ def test_empty_summary_fails_format():
     assert score_digest(bad, ACTIVITY)["format"] < score_digest(GOOD, ACTIVITY)["format"]
 
 
-def test_repetition_penalized():
-    para = "\n\nThe same sentence repeats here exactly."
-    bad = GOOD.replace("Added a sitemap generator feature.", f"Added a sitemap generator feature.{para}{para}{para}")
-    assert score_digest(bad, ACTIVITY)["repetition"] < score_digest(GOOD, ACTIVITY)["repetition"]
+def test_grounding_saturates_at_five_source_tokens():
+    solo = {"a/b": {"commits": [{"sha": "1", "message": "alpha beta gamma delta epsilon zeta"}]}}
+    digest = """# Journal
+
+## Summary
+
+Work happened today across the board.
+
+## Per-Repo Activity
+
+### b
+
+Alpha beta gamma delta epsilon mentioned here.
+"""
+    s = score_digest(digest, solo)
+    assert s["grounding"] == 1.0
+
+
+def test_no_sections_zero_grounding():
+    bare = "# Journal\n\n## Summary\n\nNothing structured here at all.\n"
+    assert score_digest(bare, ACTIVITY)["grounding"] == 0.0
 
 
 def test_missing_repo_section_fails_coverage():
@@ -82,6 +105,29 @@ def test_duplicate_section_penalized():
     dup = GOOD + "\n### usr-wwelsh/turbolab\n\nRemoved build warnings and switched systemd unit resolution to absolute paths.\n"
     s = score_digest(dup, ACTIVITY)
     assert s["penalties"] > 0
+
+
+def test_copy_pasted_bodies_penalized():
+    bad = GOOD.replace(
+        "Added a sitemap generator feature.",
+        "Removed build warnings and switched systemd unit resolution to absolute paths.")
+    s = score_digest(bad, ACTIVITY)
+    assert s["penalties"] > 0
+    assert s["total"] < score_digest(GOOD, ACTIVITY)["total"]
+
+
+def test_hallucinated_repo_variants_penalized():
+    spammy = GOOD + """
+### usr-wwelsh/turbolab-dev
+
+Removed build warnings and switched systemd unit resolution to absolute paths.
+
+### usr-wwelsh/turbolab-dev-dev
+
+Removed build warnings and switched systemd unit resolution to absolute paths.
+"""
+    s = score_digest(spammy, ACTIVITY)
+    assert s["total"] < score_digest(GOOD, ACTIVITY)["total"]
 
 
 def test_short_repo_name_accepted():

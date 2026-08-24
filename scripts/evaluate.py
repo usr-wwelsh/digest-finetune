@@ -23,7 +23,7 @@ def main() -> None:
 
     rows = [json.loads(l) for l in args.data.read_text().splitlines()]
     totals = []
-    print(f"{'date':<12} {'total':>6} {'fmt':>5} {'cov':>5} {'gnd':>5} {'rep':>5}")
+    print(f"{'date':<12} {'total':>6} {'fmt':>5} {'cov':>5} {'gnd':>5} {'pen':>5}")
     for row in rows:
         msgs = [{"role": "user", "content": row["prompt"]}]
         inputs = tok.apply_chat_template(msgs, add_generation_prompt=True, return_tensors="pt", return_dict=True)
@@ -38,7 +38,7 @@ def main() -> None:
         s = score_digest(digest, row["activity"])
         totals.append(s["total"])
         print(f"{row['date']:<12} {s['total']:>6.3f} {s['format']:>5.2f} {s['coverage']:>5.2f} "
-              f"{s['grounding']:>5.2f} {s['repetition']:>5.2f}")
+              f"{s['grounding']:>5.2f} {s['penalties']:>5.2f}")
     if totals:
         print(f"\nmean total: {sum(totals)/len(totals):.3f} over {len(totals)} days")
 
