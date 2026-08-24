@@ -18,6 +18,47 @@ STOPWORDS |= MANIFEST_STOPWORDS
 
 WORD_RE = re.compile(r"[a-z0-9_]+")
 
+# code-file extensions worth fact-checking mentions of; deliberately narrow so we don't
+# flag prose like version numbers, IPs, or "e.g." as filenames
+CODE_EXTENSIONS = {
+    "js", "jsx", "ts", "tsx", "py", "go", "rs", "c", "h", "cpp", "hpp", "java", "kt", "kts",
+    "svelte", "vue", "json", "yaml", "yml", "md", "css", "html", "xml", "sh", "toml", "sql",
+    "rb", "php", "dart", "gradle", "cfg", "ini", "env", "proto",
+}
+# common tech/framework/tool names that look like a "file.ext" mention but aren't a file claim
+NON_FILE_DOTTED_NAMES = {
+    "node.js", "vue.js", "react.js", "next.js", "nuxt.js", "d3.js", "three.js",
+    "express.js", "socket.io", "chart.js", "vite.js", "llama.cpp",
+}
+FILE_MENTION_RE = re.compile(r"\b[\w][\w/-]*\.([A-Za-z]{1,10})\b")
+
+
+def real_filenames(activity: dict) -> set[str]:
+    """Filenames the model could plausibly cite: diffed files, plus any filename-shaped
+    token in a commit message -- messages are shown in the prompt same as file stats, so
+    e.g. a message naming a generated output file (not itself part of the diff) is grounded."""
+    names = set()
+    for data in activity.values():
+        for c in data.get("commits", []):
+            for f in c.get("files", []):
+                names.add(f["filename"].strip().lower().split("/")[-1])
+            for m in FILE_MENTION_RE.finditer(c["message"]):
+                if m.group(1).lower() in CODE_EXTENSIONS:
+                    names.add(m.group(0).lower().split("/")[-1])
+    return names
+
+
+def fabricated_file_mentions(body: str, real: set[str]) -> int:
+    count = 0
+    for m in FILE_MENTION_RE.finditer(body):
+        if m.group(1).lower() not in CODE_EXTENSIONS:
+            continue
+        mentioned = m.group(0).lower().split("/")[-1]
+        if mentioned in NON_FILE_DOTTED_NAMES or mentioned in real:
+            continue
+        count += 1
+    return count
+
 
 def _stem(t: str) -> str:
     for suf in ("ing", "ies", "ed", "es", "s"):
@@ -140,9 +181,13 @@ def _jaccard(a: set[str], b: set[str]) -> float:
     return len(a & b) / len(a | b)
 
 
-def penalties(digest: str, sections: list[tuple[str, str]], repos: list[str]) -> float:
+def penalties(digest: str, sections: list[tuple[str, str]], repos: list[str], activity: dict) -> float:
     low = digest.lower()
     p = sum(1 for b in BANNED if b in low) * 0.5
+
+    real = real_filenames(activity)
+    fabricated = sum(fabricated_file_mentions(b, real) for _, b in sections)
+    p += min(0.5, fabricated * 0.3)
 
     headers = [n for n, _ in sections]
     if len(set(headers)) < len(headers):
@@ -175,7 +220,7 @@ def score_digest(digest: str, activity: dict) -> dict:
     f = format_score(digest, repos)
     c = coverage_score(digest, activity)
     g = grounding_score(digest, activity)
-    p = penalties(digest, sections, repos)
+    p = penalties(digest, sections, repos, activity)
     total = max(0.0, 0.30 * f + 0.45 * c + 0.25 * g - p)
     return {"format": f, "coverage": c, "grounding": round(g, 3),
             "penalties": p, "total": round(total, 3)}

@@ -259,3 +259,91 @@ def test_short_repo_name_accepted():
     alt = GOOD.replace("### usr-wwelsh/turbolab", "### turbolab")
     s = score_digest(alt, ACTIVITY)
     assert s["format"] == 1.0
+
+
+FILES_ACTIVITY = {
+    "usr-wwelsh/turbolab": {"commits": [
+        {"sha": "ac4a9c1", "message": "chore: build warning fixes", "files": [
+            {"filename": "web/src/App.svelte", "additions": 1, "deletions": 1},
+            {"filename": "web/src/lib/Memory.svelte", "additions": 6, "deletions": 1},
+        ]},
+        {"sha": "d49b6c9", "message": "fix: systemd absolute path", "files": [
+            {"filename": "cmd/setup.go", "additions": 38, "deletions": 6},
+        ]},
+    ]},
+}
+
+FILES_GOOD = """# Developer Journal
+
+## Summary
+
+Turbolab cleaned up build warnings in App.svelte and fixed systemd absolute path handling in setup.go.
+
+## Per-Repo Activity
+
+### usr-wwelsh/turbolab
+
+Removed build warnings from App.svelte and switched setup.go to absolute paths for systemd.
+"""
+
+
+def test_fabricated_filename_penalized():
+    # real overlap padded with a specific file that was never touched -- exactly the
+    # pattern that let a hallucinated claim score 0.787 in practice: enough true keywords
+    # to max grounding, with an invented specific detail costing nothing under the old scoring
+    padded = FILES_GOOD.replace(
+        "Removed build warnings from App.svelte and switched setup.go to absolute paths for systemd.",
+        "Removed build warnings from App.svelte and libMemory.svelte, and switched setup.go "
+        "to absolute paths for systemd.")
+    good_score = score_digest(FILES_GOOD, FILES_ACTIVITY)
+    bad_score = score_digest(padded, FILES_ACTIVITY)
+    assert bad_score["penalties"] > good_score["penalties"]
+    assert bad_score["total"] < good_score["total"]
+
+
+def test_real_filename_not_penalized():
+    # Memory.svelte *was* touched -- citing it by basename shouldn't cost anything
+    real = FILES_GOOD.replace(
+        "Removed build warnings from App.svelte and switched setup.go to absolute paths for systemd.",
+        "Removed build warnings from App.svelte and Memory.svelte, and switched setup.go "
+        "to absolute paths for systemd.")
+    assert score_digest(real, FILES_ACTIVITY)["penalties"] == 0.0
+
+
+def test_tech_brand_name_not_penalized():
+    # "Node.js" matches the filename-mention shape but isn't a file claim
+    brand = FILES_GOOD.replace(
+        "Turbolab cleaned up build warnings in App.svelte and fixed systemd absolute path handling in setup.go.",
+        "Turbolab cleaned up build warnings in its Node.js tooling and fixed systemd absolute path handling.")
+    assert score_digest(brand, FILES_ACTIVITY)["penalties"] == 0.0
+
+
+def test_known_dependency_name_not_penalized():
+    # llama.cpp is a real upstream dependency name, not a file claim
+    dep = FILES_GOOD.replace(
+        "Turbolab cleaned up build warnings in App.svelte and fixed systemd absolute path handling in setup.go.",
+        "Turbolab cleaned up a llama.cpp memory leak and fixed systemd absolute path handling in setup.go.")
+    assert score_digest(dep, FILES_ACTIVITY)["penalties"] == 0.0
+
+
+def test_filename_from_commit_message_not_penalized():
+    # a filename named only in the commit message (e.g. a generated output, not itself
+    # part of the diff) is still grounded -- the message is shown to the model too
+    activity = {"usr-wwelsh/botdocs": {"commits": [
+        {"sha": "1", "message": "feat: emit sitemap.xml via baseUrl config", "files": [
+            {"filename": "src/builder/site-generator.ts", "additions": 20, "deletions": 0},
+        ]},
+    ]}}
+    digest = """# Developer Journal
+
+## Summary
+
+botdocs now emits sitemap.xml during the build.
+
+## Per-Repo Activity
+
+### usr-wwelsh/botdocs
+
+Wired sitemap.xml generation into the site builder via a baseUrl config option.
+"""
+    assert score_digest(digest, activity)["penalties"] == 0.0
