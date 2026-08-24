@@ -51,9 +51,24 @@ so digest writing runs offline on CPU — eventually bundled into git-digest its
   sparse (1-commit) days the model sometimes skips the required `### repo` structure
   and fills in plausible-sounding but ungrounded detail instead of failing outright.
   Format + grounding failure, not collapse — this is the primary GRPO target now.
+- First GRPO run (60 steps, T4 Colab) collapsed: final checkpoint looped identical
+  commit-sha sections verbatim instead of improving. Cause: `num_generations=4` made
+  group-relative advantage noisy enough that a degenerate completion could still rank
+  "best of group", and `format_score`'s binary all-or-nothing gate combined with
+  `max_completion_length=450` truncating 50-88% of rollouts gave a spiky, unreliable
+  reward signal. Fixed in `scripts/reward.py` (graded format score, duplicate-section
+  penalty) and `scripts/grpo.py` (`gens=8`, `beta=0.05`, `max_completion=768`,
+  `mask_truncated_completions=True`) — retry pending.
 - `checkpoints/` and `data/` are gitignored — moving to another machine (e.g. the
   homelab LXC for GRPO) needs an explicit `rsync`/`scp` of both, git clone alone
   won't carry them.
+
+## Weights
+
+- [usr-wwelsh/digest-sft2](https://huggingface.co/usr-wwelsh/digest-sft2) — SFT checkpoint, mean reward
+  0.499 on held-out eval. Current best.
+- GRPO checkpoint is not yet published — the first run collapsed into repeating identical sections
+  (see Known issues); will publish once a run beats the SFT baseline.
 
 ## Next steps
 
