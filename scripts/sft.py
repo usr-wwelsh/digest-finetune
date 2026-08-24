@@ -28,16 +28,19 @@ def main() -> None:
     if not cuda:
         torch.set_num_threads(args.threads)
 
-    def to_text(row):
-        msgs = [
-            {"role": "user", "content": row["prompt"]},
-            {"role": "assistant", "content": row["completion"]},
-        ]
-        return {"text": tok.apply_chat_template(msgs, tokenize=False)}
+    def to_prompt_completion(row):
+        # native TRL prompt-completion format: conversational "prompt" (a message list, so the
+        # chat template + generation-prompt tokens apply correctly) paired with "completion" --
+        # this is what makes SFTTrainer auto-detect completion_only_loss and mask the (now much
+        # longer, diff-heavy) prompt out of the loss instead of training on it too.
+        return {
+            "prompt": [{"role": "user", "content": row["prompt"]}],
+            "completion": [{"role": "assistant", "content": row["completion"]}],
+        }
 
     rows = [json.loads(l) for l in (args.data / "train.jsonl").read_text().splitlines()]
     tok = AutoTokenizer.from_pretrained(args.base)
-    ds = Dataset.from_list([to_text(r) for r in rows])
+    ds = Dataset.from_list([to_prompt_completion(r) for r in rows])
 
     model = AutoModelForCausalLM.from_pretrained(
         args.base, dtype=torch.bfloat16 if cuda else torch.float32
@@ -49,6 +52,7 @@ def main() -> None:
         per_device_train_batch_size=args.batch,
         gradient_accumulation_steps=args.accum,
         max_length=args.max_length,
+        completion_only_loss=True,
         warmup_steps=3,
         lr_scheduler_type="cosine",
         logging_steps=1,

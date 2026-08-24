@@ -82,6 +82,22 @@ so digest writing runs offline on CPU — eventually bundled into git-digest its
   rows below 0.7, one at 0.30 — all sparse/"init"/merge-commit days with no lexical ground
   truth). `sft2`/`grpo` checkpoints predate this fix and were trained on message-only prompts —
   do not resume GRPO from them; rerun SFT on the diff-aware dataset first (`colab/digest_sft_colab.ipynb`).
+- **Second bug this surfaced: `sft.py` was training on the whole prompt, not just the
+  completion.** It flattened prompt+completion into one `"text"` field, which TRL's SFTTrainer
+  treats as plain language modeling — loss over the entire sequence, no masking. That was mostly
+  harmless when prompts were short (message-only), but with diff-aware prompts running up to
+  ~3.5k tokens against ~300-600 token completions, most of every gradient step went to predicting
+  diff/JSON syntax instead of digest text. Caught by comparing a live Colab run's loss curve
+  against `sft2.log`: it tracked *better* than the old run through epoch ~2, then plateaued
+  around 2.7-2.9 while the old run kept dropping to ~2.1-2.4 by epoch 3.3-3.6 — consistent with
+  the model quickly fitting the easy, now-dominant prompt tokens and further completion-quality
+  gains getting diluted into invisibility in the aggregate loss. Fixed: `sft.py` now passes native
+  TRL `"prompt"`/`"completion"` columns (prompt as a conversational message list, so the chat
+  template + `completion_only_loss` auto-enable) instead of a flat `"text"` field. Verified
+  directly on a real example: 900/1196 tokens (75%) were prompt and are now correctly masked
+  from the loss. This affected every prior SFT run, including the one behind `sft2`/`checkpoint-40`
+  — its loss curve likely understates how well it actually fit the completions, though its
+  message-only prompts were short enough that the effect was much smaller.
 - Fixed one real bug the backfill surfaced: a commit touching a minified `dist/` bundle produced
   a single ~60k-character diff line, which line-count truncation (`maxPatchLines`) doesn't bound.
   `digest_format.is_low_signal_file()` now excludes generated/build-output paths and lockfiles
