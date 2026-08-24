@@ -1,5 +1,6 @@
 import argparse
 import json
+import sys
 from pathlib import Path
 
 import torch
@@ -8,6 +9,11 @@ from transformers import AutoModelForCausalLM, AutoTokenizer, TrainerCallback
 from trl import GRPOConfig, GRPOTrainer
 
 from reward import score_digest
+
+# see sft.py: stdout is block-buffered under redirection, which would hide both the
+# per-step reward components and the abort-guard message until the run exits -- the
+# abort message in particular is worthless if it only appears after the fact.
+sys.stdout.reconfigure(line_buffering=True)
 
 
 def abort_reason(history: list[dict], patience: int = 3, min_train_gain: float = 0.05,

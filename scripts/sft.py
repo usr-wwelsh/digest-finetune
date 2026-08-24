@@ -1,11 +1,19 @@
 import argparse
 import json
+import sys
 from pathlib import Path
 
 import torch
 from datasets import Dataset
 from transformers import AutoModelForCausalLM, AutoTokenizer
 from trl import SFTConfig, SFTTrainer
+
+# Trainer prints its loss dicts to stdout, which Python block-buffers at 8KB when
+# redirected to a log file. A run logs ~42 lines at ~150 bytes, so the buffer never
+# fills and every loss line appears only at process exit -- a multi-hour run looks
+# like it is producing no metrics at all (tqdm's progress bar goes to stderr, so it
+# shows up regardless, which makes the loss look specifically broken).
+sys.stdout.reconfigure(line_buffering=True)
 
 
 def main() -> None:
