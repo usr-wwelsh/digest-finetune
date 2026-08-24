@@ -20,9 +20,13 @@ def main() -> None:
     ap.add_argument("--save-steps", type=int, default=3)
     ap.add_argument("--save-total-limit", type=int, default=2)
     ap.add_argument("--save-only-model", action="store_true")
+    ap.add_argument("--max-length", type=int, default=4096)
+    ap.add_argument("--threads", type=int, default=6)
     args = ap.parse_args()
 
-    torch.set_num_threads(6)
+    cuda = torch.cuda.is_available()
+    if not cuda:
+        torch.set_num_threads(args.threads)
 
     def to_text(row):
         msgs = [
@@ -35,14 +39,16 @@ def main() -> None:
     tok = AutoTokenizer.from_pretrained(args.base)
     ds = Dataset.from_list([to_text(r) for r in rows])
 
-    model = AutoModelForCausalLM.from_pretrained(args.base, dtype=torch.float32)
+    model = AutoModelForCausalLM.from_pretrained(
+        args.base, dtype=torch.bfloat16 if cuda else torch.float32
+    )
     cfg = SFTConfig(
         output_dir=str(args.out),
         num_train_epochs=args.epochs,
         learning_rate=args.lr,
         per_device_train_batch_size=args.batch,
         gradient_accumulation_steps=args.accum,
-        max_length=1536,
+        max_length=args.max_length,
         warmup_steps=3,
         lr_scheduler_type="cosine",
         logging_steps=1,
@@ -50,7 +56,7 @@ def main() -> None:
         save_steps=args.save_steps,
         save_total_limit=args.save_total_limit,
         save_only_model=args.save_only_model,
-        bf16=False,
+        bf16=cuda,
         report_to=[],
         seed=0,
     )

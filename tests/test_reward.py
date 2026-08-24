@@ -79,10 +79,29 @@ Work happened today across the board.
 
 ### b
 
-Alpha beta gamma delta epsilon mentioned here.
+Alpha beta gamma delta epsilon all landed today alongside general polish,
+cleanup work, and small consistency improvements throughout.
 """
     s = score_digest(digest, solo)
     assert s["grounding"] == 1.0
+
+
+def test_bare_source_word_list_discounted():
+    solo = {"a/b": {"commits": [{"sha": "1", "message": "alpha beta gamma delta epsilon zeta"}]}}
+    digest = """# Journal
+
+## Summary
+
+Work happened today across the board.
+
+## Per-Repo Activity
+
+### b
+
+Alpha beta gamma delta epsilon mentioned here.
+"""
+    s = score_digest(digest, solo)
+    assert s["grounding"] < 1.0
 
 
 def test_no_sections_zero_grounding():
@@ -128,6 +147,112 @@ Removed build warnings and switched systemd unit resolution to absolute paths.
 """
     s = score_digest(spammy, ACTIVITY)
     assert s["total"] < score_digest(GOOD, ACTIVITY)["total"]
+
+
+def test_empty_body_section_fails_coverage():
+    gamed = """# Developer Journal
+
+## Summary
+
+Turbolab and botdocs both saw active development work today across the board.
+
+## Per-Repo Activity
+
+### usr-wwelsh/turbolab
+
+### usr-wwelsh/botdocs
+"""
+    s = score_digest(gamed, ACTIVITY)
+    assert s["coverage"] == 0.0
+    assert s["total"] < 0.4
+
+
+def test_unrelated_filler_body_fails_coverage():
+    gamed = GOOD.replace(
+        "Removed build warnings and switched systemd unit resolution to absolute paths.",
+        "banana mango kayak umbrella").replace(
+        "Added a sitemap generator feature.",
+        "giraffe volcano ticket window")
+    s = score_digest(gamed, ACTIVITY)
+    assert s["coverage"] == 0.0
+    assert s["total"] < 0.4
+
+
+def test_copied_sha_body_fails_coverage():
+    gamed = GOOD.replace(
+        "Removed build warnings and switched systemd unit resolution to absolute paths.",
+        "ac4a9c1 d49b6c9 commit reference").replace(
+        "Added a sitemap generator feature.",
+        "1111111 commit reference here")
+    s = score_digest(gamed, ACTIVITY)
+    assert s["coverage"] == 0.0
+
+
+def test_single_keyword_plus_filler_fails_coverage():
+    gamed = GOOD.replace(
+        "Removed build warnings and switched systemd unit resolution to absolute paths.",
+        "systemd banana mango").replace(
+        "Added a sitemap generator feature.",
+        "sitemap giraffe volcano")
+    s = score_digest(gamed, ACTIVITY)
+    assert s["coverage"] == 0.0
+    assert s["total"] < 0.4
+
+
+def test_terse_but_grounded_body_passes_coverage():
+    terse = GOOD.replace(
+        "Removed build warnings and switched systemd unit resolution to absolute paths.",
+        "Fixed build warnings and systemd path.")
+    assert score_digest(terse, ACTIVITY)["coverage"] == 1.0
+
+
+def test_verbatim_commit_dump_scores_below_honest():
+    solo = {"usr-wwelsh/turbolab": {"commits": [
+        {"sha": s, "message": m} for s, m in [
+            ("1", "feat: add ram-aware quant selection"),
+            ("2", "fix: stream upload timeouts"),
+            ("3", "chore: bump llama cpp backend"),
+            ("4", "feat: openai compatible chat completions"),
+            ("5", "fix: web ui token counter overflow"),
+            ("6", "docs: readme quickstart section"),
+        ]]}}
+    def digest(body):
+        return f"""# Developer Journal
+
+## Summary
+
+Turbolab shipped several backend and interface improvements across the day.
+
+## Per-Repo Activity
+
+### usr-wwelsh/turbolab
+
+{body}
+"""
+    good = digest(
+        "Work focused on making quantization pick the right size for available memory "
+        "and on steadier uploads. The chat endpoint gained compatibility improvements, "
+        "and the web interface got a small counting fix alongside setup docs.")
+    dump = digest("\n".join(
+        f"- {m}" for _, m in solo["usr-wwelsh/turbolab"]["commits"]))
+    assert score_digest(dump, solo)["total"] < score_digest(good, solo)["total"]
+
+
+def test_small_similar_sections_on_big_day_not_nuked():
+    big = {
+        f"usr-wwelsh/repo{i}": {"commits": [
+            {"sha": str(i), "message": f"docs: read{me} badge update"}]}
+        for i, me in enumerate(["me"] * 6)
+    }
+    lines = ["# Developer Journal", "", "## Summary", "",
+             "Quiet day across six repositories with only documentation housekeeping landed.", "",
+             "## Per-Repo Activity"]
+    for i in range(6):
+        lines += ["", f"### usr-wwelsh/repo{i}", "", "Readme badge documentation touched briefly."]
+    digest = "\n".join(lines) + "\n"
+    s = score_digest(digest, big)
+    assert s["penalties"] == 0.0
+    assert s["total"] > 0.6
 
 
 def test_short_repo_name_accepted():

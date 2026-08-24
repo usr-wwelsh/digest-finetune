@@ -4,6 +4,8 @@ import re
 import sys
 from pathlib import Path
 
+from digest_format import include_patches
+
 INSTRUCTION = (
     "Write a developer journal entry in markdown with:\n"
     "1. `## Summary` — what shipped, what you were deep in, anything notable across repos\n"
@@ -28,6 +30,7 @@ def extract_target(md: str) -> str:
 
 
 def build_prompt(date: str, lookback: int, username: str, activity: dict) -> str:
+    show_patches = include_patches(activity)
     parts = [f"GitHub commits for {username}, {date} (last {lookback} day(s)):\n"]
     for name, data in activity.items():
         commits = data.get("commits", [])
@@ -37,6 +40,17 @@ def build_prompt(date: str, lookback: int, username: str, activity: dict) -> str
         for c in commits:
             msg = c["message"].split("\n", 1)[0]
             parts.append(f"- {c['sha'][:7]}: {msg}\n")
+            files = c.get("files", [])
+            if files:
+                stats = ", ".join(f"{f['filename']} +{f['additions']} -{f['deletions']}" for f in files)
+                parts.append(f"  {stats}\n")
+                if show_patches:
+                    for f in files:
+                        if not f.get("patch"):
+                            continue
+                        parts.append(f"  diff {f['filename']}:\n")
+                        for line in f["patch"].split("\n"):
+                            parts.append(f"    {line}\n")
         parts.append("\n")
     parts.append(INSTRUCTION)
     return "".join(parts)
