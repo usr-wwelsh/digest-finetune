@@ -157,7 +157,7 @@ def main() -> None:
             why = abort_reason(self.history, patience=args.abort_patience)
             if why:
                 print(f"\n[abort @ step {state.global_step}] {why}\n"
-                      f"  stopping early -- last good checkpoint is in {args.out}")
+                      f"  stopping early -- the policy as of this step still gets saved to {args.out}")
                 control.should_training_stop = True
 
         def on_log(self, targs, state, control, logs=None, **kw):
@@ -186,9 +186,7 @@ def main() -> None:
         loss_type="grpo",
         warmup_steps=5,
         logging_steps=1,
-        save_strategy="steps",
-        save_steps=10,
-        save_total_limit=4,
+        save_strategy="no",
         bf16=cuda,
         report_to=[],
         seed=0,

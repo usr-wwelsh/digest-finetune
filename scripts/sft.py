@@ -8,22 +8,6 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from trl import SFTConfig, SFTTrainer
 
 
-def resolve_resume(out: Path, resume: bool) -> bool:
-    """Resuming is explicit, never inferred. Auto-resuming whenever the output dir
-    happened to hold a checkpoint silently restarted the LR warmup mid-run and mixed
-    the new args with a stale trainer_state (sft6: warmup replayed at epoch 8, cosine
-    never decayed below 6.2e-5). A dirty dir now fails closed instead."""
-    stale = out.exists() and any(out.glob("checkpoint-*"))
-    if resume and not stale:
-        raise ValueError(f"--resume given but {out} holds no checkpoint-* dir: nothing to resume")
-    if stale and not resume:
-        raise ValueError(
-            f"{out} already holds checkpoints from an earlier run. Pass --resume to continue "
-            f"it (same args as before), or point --out at a clean dir / delete it to start fresh."
-        )
-    return resume
-
-
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--base", default="HuggingFaceTB/SmolLM2-135M-Instruct")
@@ -33,19 +17,9 @@ def main() -> None:
     ap.add_argument("--lr", type=float, default=3e-5)
     ap.add_argument("--batch", type=int, default=2)
     ap.add_argument("--accum", type=int, default=8)
-    ap.add_argument("--save-steps", type=int, default=3)
-    ap.add_argument("--save-total-limit", type=int, default=2)
-    ap.add_argument("--save-only-model", action="store_true")
     ap.add_argument("--max-length", type=int, default=4096)
     ap.add_argument("--threads", type=int, default=6)
-    ap.add_argument("--resume", action="store_true",
-                    help="continue an interrupted run in --out (must match the original args)")
     args = ap.parse_args()
-
-    try:
-        resume = resolve_resume(args.out, args.resume)
-    except ValueError as e:
-        raise SystemExit(f"sft.py: {e}")
 
     cuda = torch.cuda.is_available()
     if not cuda:
@@ -79,16 +53,16 @@ def main() -> None:
         warmup_steps=3,
         lr_scheduler_type="cosine",
         logging_steps=1,
-        save_strategy="steps",
-        save_steps=args.save_steps,
-        save_total_limit=args.save_total_limit,
-        save_only_model=args.save_only_model,
+        # only the final model is written: reward-based selection over periodic
+        # checkpoints cost far more eval time than it ever returned, and every
+        # sweep still landed on a checkpoint indistinguishable from the last step
+        save_strategy="no",
         bf16=cuda,
         report_to=[],
         seed=0,
     )
     trainer = SFTTrainer(model=model, args=cfg, train_dataset=ds, processing_class=tok)
-    trainer.train(resume_from_checkpoint=resume or None)
+    trainer.train()
     trainer.save_model(str(args.out))
     tok.save_pretrained(str(args.out))
     print(f"saved {args.out}")

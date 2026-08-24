@@ -1,50 +1,9 @@
 import sys
 from pathlib import Path
 
-import pytest
-
 sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
 
 from grpo import abort_reason  # noqa: E402
-from sft import resolve_resume  # noqa: E402
-
-
-def make_ckpt(tmp_path: Path, step: int = 3) -> Path:
-    d = tmp_path / f"checkpoint-{step}"
-    d.mkdir(parents=True)
-    (d / "trainer_state.json").write_text("{}")
-    return tmp_path
-
-
-# --- resume guard -----------------------------------------------------------
-
-
-def test_fresh_output_dir_starts_from_scratch(tmp_path):
-    assert resolve_resume(tmp_path / "sft3", resume=False) is False
-
-
-def test_existing_checkpoints_refuse_a_silent_fresh_run(tmp_path):
-    make_ckpt(tmp_path)
-    with pytest.raises(ValueError, match="--resume"):
-        resolve_resume(tmp_path, resume=False)
-
-
-def test_resume_flag_picks_up_existing_checkpoints(tmp_path):
-    make_ckpt(tmp_path)
-    assert resolve_resume(tmp_path, resume=True) is True
-
-
-def test_resume_without_checkpoints_is_an_error(tmp_path):
-    with pytest.raises(ValueError, match="nothing to resume"):
-        resolve_resume(tmp_path / "missing", resume=True)
-
-
-def test_output_dir_without_checkpoints_is_not_stale(tmp_path):
-    (tmp_path / "config.json").write_text("{}")
-    assert resolve_resume(tmp_path, resume=False) is False
-
-
-# --- divergence guard -------------------------------------------------------
 
 
 def tick(step, train, spot, tokens=400, trunc=0.0):
