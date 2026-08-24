@@ -62,15 +62,15 @@ def source_tokens(activity: dict, repo: str) -> set[str]:
 
 def format_score(digest: str, repos: list[str]) -> float:
     summary, sections = parse_sections(digest)
-    if len(summary.split()) < 10:
-        return 0.0
-    if "## Per-Repo Activity" not in digest:
-        return 0.0
-    headers = [norm_repo(n) for n, _ in sections]
     allowed = {norm_repo(r) for r in repos}
-    if not headers or any(h not in allowed for h in headers):
-        return 0.0
-    return 1.0
+    headers = [norm_repo(n) for n, _ in sections]
+    valid_headers = [h for h in headers if h in allowed]
+
+    has_summary = len(summary.split()) >= 10
+    has_section_header = "## Per-Repo Activity" in digest
+    header_precision = len(valid_headers) / len(headers) if headers else 0.0
+
+    return (has_summary + has_section_header + header_precision) / 3
 
 
 def coverage_score(digest: str, repos: list[str]) -> float:
@@ -104,18 +104,23 @@ def repetition_score(digest: str) -> float:
     return len(set(sentences)) / len(sentences)
 
 
-def penalties(digest: str) -> float:
+def penalties(digest: str, sections: list[tuple[str, str]]) -> float:
     low = digest.lower()
-    return min(1.0, sum(1 for p in BANNED if p in low) * 0.5)
+    p = sum(1 for b in BANNED if b in low) * 0.5
+    headers = [n for n, _ in sections]
+    if len(set(headers)) < len(headers):
+        p += 0.5
+    return min(1.0, p)
 
 
 def score_digest(digest: str, activity: dict) -> dict:
     repos = list(activity.keys())
+    _, sections = parse_sections(digest)
     f = format_score(digest, repos)
     c = coverage_score(digest, repos)
     g = grounding_score(digest, activity)
     r = repetition_score(digest)
-    p = penalties(digest)
+    p = penalties(digest, sections)
     total = max(0.0, 0.30 * f + 0.20 * c + 0.35 * g + 0.15 * r - p)
     return {"format": f, "coverage": c, "grounding": round(g, 3),
             "repetition": round(r, 3), "penalties": p, "total": round(total, 3)}

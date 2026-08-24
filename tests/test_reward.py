@@ -58,7 +58,7 @@ def test_hallucinated_claim_drops_grounding():
 
 def test_empty_summary_fails_format():
     bad = GOOD.replace("## Summary\n\nTurbolab cleaned up build warnings and fixed systemd absolute path handling. botdocs gained a sitemap generator.\n", "## Summary\n\n")
-    assert score_digest(bad, ACTIVITY)["format"] == 0.0
+    assert score_digest(bad, ACTIVITY)["format"] < score_digest(GOOD, ACTIVITY)["format"]
 
 
 def test_repetition_penalized():
@@ -75,6 +75,12 @@ def test_missing_repo_section_fails_coverage():
 def test_banned_phrase():
     bad = GOOD + "\nNext steps: you should refactor everything.\n"
     s = score_digest(bad, ACTIVITY)
+    assert s["penalties"] > 0
+
+
+def test_duplicate_section_penalized():
+    dup = GOOD + "\n### usr-wwelsh/turbolab\n\nRemoved build warnings and switched systemd unit resolution to absolute paths.\n"
+    s = score_digest(dup, ACTIVITY)
     assert s["penalties"] > 0
 
 
