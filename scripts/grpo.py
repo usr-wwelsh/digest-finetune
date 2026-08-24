@@ -4,7 +4,7 @@ from pathlib import Path
 
 import torch
 from datasets import Dataset
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from transformers import AutoModelForCausalLM, AutoTokenizer, TrainerCallback
 from trl import GRPOConfig, GRPOTrainer
 
 from reward import score_digest
@@ -24,6 +24,8 @@ def main() -> None:
     ap.add_argument("--steps", type=int, default=60)
     ap.add_argument("--threads", type=int, default=6)
     ap.add_argument("--limit", type=int, default=0, help="use only N prompts (smoke test)")
+    ap.add_argument("--spotcheck-every", type=int, default=20,
+                    help="generate+score one held-out eval day every N steps (0=off)")
     args = ap.parse_args()
 
     torch.set_num_threads(args.threads)
@@ -39,16 +41,73 @@ def main() -> None:
         for r in rows
     ])
 
-    def digest_reward(completions, activity=None, **kw):
+    def digest_reward(completions, activity=None, completion_ids=None, log_metric=None, **kw):
         scores = []
-        for c, a in zip(completions, activity):
+        comps = {"format": [], "coverage": [], "grounding": [], "penalties": [],
+                 "truncated": []}
+        for i, (c, a) in enumerate(zip(completions, activity)):
             text = c[-1]["content"] if isinstance(c, list) else c
             act = json.loads(a) if isinstance(a, str) else a
-            scores.append(score_digest(text, act)["total"])
+            s = score_digest(text, act)
+            total = s["total"]
+            truncated = completion_ids is not None and len(completion_ids[i]) >= args.max_completion
+            if truncated:
+                total *= 0.5
+            comps["truncated"].append(1.0 if truncated else 0.0)
+            for k in ("format", "coverage", "grounding", "penalties"):
+                comps[k].append(s[k])
+            scores.append(total)
+        if log_metric is not None:
+            for k, v in comps.items():
+                log_metric(k, sum(v) / len(v))
         return scores
+
+    eval_rows = []
+    if args.spotcheck_every:
+        eval_path = Path(__file__).parent.parent / "data/eval.jsonl"
+        eval_rows = [json.loads(l) for l in eval_path.read_text().splitlines()]
+
+    class Spotcheck(TrainerCallback):
+        def __init__(self, tok):
+            self.tok = tok
+            self.i = 0
+            self.pending = {}
+
+        def on_step_end(self, targs, state, control, model=None, **kw):
+            last = state.global_step >= state.max_steps
+            if not eval_rows or (state.global_step % args.spotcheck_every and not last):
+                return
+            row = eval_rows[self.i % len(eval_rows)]
+            self.i += 1
+            was_training = model.training
+            model.eval()
+            msgs = [{"role": "user", "content": row["prompt"]}]
+            inputs = self.tok.apply_chat_template(
+                msgs, add_generation_prompt=True, return_tensors="pt", return_dict=True)
+            with torch.no_grad():
+                out = model.generate(
+                    **inputs, max_new_tokens=args.max_completion,
+                    do_sample=args.temperature > 0,
+                    temperature=max(args.temperature, 1e-5), top_p=0.95,
+                )
+            n_new = out.shape[1] - inputs["input_ids"].shape[1]
+            text = self.tok.decode(out[0][inputs["input_ids"].shape[1]:],
+                                   skip_special_tokens=True)
+            s = score_digest(text, row["activity"])
+            print(f"\n[spotcheck {row['date']}] {json.dumps(s)} tokens={n_new}"
+                  f"{' TRUNCATED' if n_new >= args.max_completion else ''}")
+            print("  " + text[:200].replace("\n", " "))
+            model.train(was_training)
+            self.pending = {f"spotcheck/{k}": v for k, v in s.items()}
+
+        def on_log(self, targs, state, control, logs=None, **kw):
+            if self.pending and logs is not None:
+                logs.update(self.pending)
+                self.pending = {}
 
     cuda = torch.cuda.is_available()
     tok = AutoTokenizer.from_pretrained(args.model)
+    spotcheck = Spotcheck(tok)
     model = AutoModelForCausalLM.from_pretrained(
         args.model, dtype=torch.bfloat16 if cuda else torch.float32
     )
@@ -81,6 +140,7 @@ def main() -> None:
         args=cfg,
         train_dataset=ds,
         processing_class=tok,
+        callbacks=[spotcheck],
     )
     trainer.train()
     trainer.save_model(str(args.out))
