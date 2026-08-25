@@ -82,13 +82,38 @@ def plan_dataset(prompt_lens: list[int], batch: int, heads: int, max_completion:
     )
 
 
+def spotcheck_entry(step: int, train_reward: float, truncated_rate: float,
+                    totals: list[float], token_counts: list[int],
+                    ref_tokens: int) -> dict:
+    """One guard history tick: the MEAN over k rollouts of one fixed held-out day.
+
+    The 2026-08-24 run was gated by spotchecks of 1.0, 1.0, 0.05 -- three different
+    days at one sampled rollout each. Day-hopping conflated day difficulty with
+    policy change and a single penalty-heavy draw read as collapse. Pinning the day
+    makes every pair of ticks like-for-like; averaging k rollouts damps sampling
+    noise by ~1/sqrt(k). A persistent drop across such ticks is real signal."""
+    n = max(1, len(totals))
+    return {
+        "step": step,
+        "train_reward": train_reward,
+        "spotcheck_total": sum(totals) / n,
+        "tokens": sum(token_counts) / n,
+        "ref_tokens": ref_tokens,
+        "truncated_rate": truncated_rate,
+        "rollouts": n,
+    }
+
+
 def abort_reason(history: list[dict], patience: int = 3, min_train_gain: float = 0.05,
                  length_floor: float = 0.5, trunc_ceiling: float = 0.5) -> str | None:
     """Why this run should stop, or None to keep going.
 
     GRPO against a lexical reward fails in ways the reward itself cannot see, so these
     all read the held-out spotcheck rather than the training score. Judged only over the
-    last `patience` ticks, so a run that stalls and then recovers isn't held to it."""
+    last `patience` ticks, so a run that stalls and then recovers isn't held to it.
+    Every history entry must come from spotcheck_entry(): same pinned day per tick,
+    k-rollout means -- comparing raw single-draw scores across different days is how
+    grpo3 aborted on noise."""
     if len(history) < patience:
         return None
     win = history[-patience:]
@@ -135,7 +160,13 @@ def main() -> None:
     ap.add_argument("--threads", type=int, default=6)
     ap.add_argument("--limit", type=int, default=0, help="use only N prompts (smoke test)")
     ap.add_argument("--spotcheck-every", type=int, default=20,
-                    help="generate+score one held-out eval day every N steps (0=off)")
+                    help="generate+score held-out rollouts every N steps (0=off)")
+    ap.add_argument("--spotcheck-gens", type=int, default=4,
+                    help="rollouts averaged per spotcheck tick; 1 reproduces the noisy "
+                         "n=1 guard that aborted grpo3 on a single bad draw")
+    ap.add_argument("--spotcheck-day", type=int, default=0,
+                    help="which held-out eval row every tick scores; pinned so "
+                         "tick-over-tick deltas measure the policy, not the day")
     ap.add_argument("--abort-patience", type=int, default=3,
                     help="spotchecks the divergence guard judges over (0=never abort)")
     ap.add_argument("--save-steps", type=int, default=10,
@@ -233,7 +264,6 @@ def main() -> None:
     class Spotcheck(TrainerCallback):
         def __init__(self, tok):
             self.tok = tok
-            self.i = 0
             self.pending = {}
             self.history: list[dict] = []
 
@@ -241,53 +271,65 @@ def main() -> None:
             last = state.global_step >= state.max_steps
             if not eval_rows or (state.global_step % args.spotcheck_every and not last):
                 return
-            row = eval_rows[self.i % len(eval_rows)]
-            self.i += 1
+            # pinned day: every tick scores the same row, so win[-1] - win[0] in
+            # abort_reason compares like with like instead of easy-day vs hard-day
+            row = eval_rows[args.spotcheck_day % len(eval_rows)]
             was_training = model.training
             model.eval()
-            msgs = [{"role": "user", "content": row["prompt"]}]
-            inputs = self.tok.apply_chat_template(
-                msgs, add_generation_prompt=True, return_tensors="pt", return_dict=True)
-            # the callback ran generate() with CPU tensors against a CUDA model, which
-            # transformers warns about and silently works around, slowly
-            inputs = {k: v.to(model.device) for k, v in inputs.items()}
-            with torch.no_grad():
-                out = model.generate(
-                    **inputs, max_new_tokens=args.max_completion,
-                    do_sample=args.temperature > 0,
-                    temperature=max(args.temperature, 1e-5), top_p=0.95,
-                )
-            n_new = out.shape[1] - inputs["input_ids"].shape[1]
-            text = self.tok.decode(out[0][inputs["input_ids"].shape[1]:],
-                                   skip_special_tokens=True)
-            # the training reward already halves a truncated rollout, so scoring the
-            # spotcheck without it left the guard's own signal blind to rambling: a
-            # policy looping to the cap kept a high held-out score, which suppresses
-            # the divergence rule (train falls, held-out doesn't) and reads as maximum
-            # length rather than collapse. Only the rollout truncation rate was left.
-            truncated = n_new >= args.max_completion
-            s = score_digest(text, row["activity"], truncated=truncated)
             ref = len(self.tok(row["completion"]).input_ids)
-            print(f"\n[spotcheck {row['date']}] {json.dumps(s)} tokens={n_new}"
-                  f" ({n_new / ref:.0%} of reference {ref})"
-                  f"{' TRUNCATED' if truncated else ''}")
-            print("  " + text[:200].replace("\n", " "))
+            scores: list[dict] = []
+            totals: list[float] = []
+            token_counts: list[int] = []
+            for _ in range(max(1, args.spotcheck_gens)):
+                msgs = [{"role": "user", "content": row["prompt"]}]
+                inputs = self.tok.apply_chat_template(
+                    msgs, add_generation_prompt=True, return_tensors="pt", return_dict=True)
+                # the callback ran generate() with CPU tensors against a CUDA model, which
+                # transformers warns about and silently works around, slowly
+                inputs = {k: v.to(model.device) for k, v in inputs.items()}
+                with torch.no_grad():
+                    out = model.generate(
+                        **inputs, max_new_tokens=args.max_completion,
+                        do_sample=args.temperature > 0,
+                        temperature=max(args.temperature, 1e-5), top_p=0.95,
+                    )
+                n_new = out.shape[1] - inputs["input_ids"].shape[1]
+                text = self.tok.decode(out[0][inputs["input_ids"].shape[1]:],
+                                       skip_special_tokens=True)
+                # the training reward already halves a truncated rollout, so scoring the
+                # spotcheck without it left the guard's own signal blind to rambling: a
+                # policy looping to the cap kept a high held-out score, which suppresses
+                # the divergence rule (train falls, held-out doesn't) and reads as maximum
+                # length rather than collapse. Only the rollout truncation rate was left.
+                truncated = n_new >= args.max_completion
+                s = score_digest(text, row["activity"], truncated=truncated)
+                scores.append(s)
+                totals.append(s["total"])
+                token_counts.append(n_new)
             model.train(was_training)
-            self.pending = {f"spotcheck/{k}": v for k, v in s.items()}
+
+            mean_s = {k: sum(d[k] for d in scores) / len(scores) for k in scores[0]}
+            mean_tokens = sum(token_counts) / len(token_counts)
+            draws = f"{min(totals):.2f}-{max(totals):.2f}" if len(totals) > 1 else f"{totals[0]:.2f}"
+            any_trunc = " TRUNCATED" if any(t >= args.max_completion for t in token_counts) else ""
+            print(f"\n[spotcheck {row['date']} x{len(scores)}] {json.dumps(mean_s)}\n"
+                  f"  tokens mean={mean_tokens:.0f} (draws {draws}), "
+                  f"{mean_tokens / ref:.0%} of reference {ref}{any_trunc}")
+            self.pending = {f"spotcheck/{k}": v for k, v in mean_s.items()}
 
             if not args.abort_patience:
                 return
             seen, batch_stats[:] = list(batch_stats), []
             if not seen:
                 return
-            self.history.append({
-                "step": state.global_step,
-                "train_reward": sum(r for r, _ in seen) / len(seen),
-                "spotcheck_total": s["total"],
-                "tokens": n_new,
-                "ref_tokens": len(self.tok(row["completion"]).input_ids),
-                "truncated_rate": sum(t for _, t in seen) / len(seen),
-            })
+            self.history.append(spotcheck_entry(
+                step=state.global_step,
+                train_reward=sum(r for r, _ in seen) / len(seen),
+                truncated_rate=sum(t for _, t in seen) / len(seen),
+                totals=totals,
+                token_counts=token_counts,
+                ref_tokens=ref,
+            ))
             why = abort_reason(self.history, patience=args.abort_patience)
             if why:
                 print(f"\n[abort @ step {state.global_step}] {why}\n"

@@ -3,7 +3,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
 
-from grpo import abort_reason  # noqa: E402
+from grpo import abort_reason, spotcheck_entry  # noqa: E402
 
 
 def tick(step, train, spot, tokens=400, ref=400, trunc=0.0):
@@ -90,3 +90,47 @@ def test_only_the_recent_window_is_judged():
     hist = [tick(1, 0.40, 0.55), tick(2, 0.60, 0.54), tick(3, 0.78, 0.53),
             tick(4, 0.80, 0.62), tick(5, 0.82, 0.70), tick(6, 0.84, 0.78)]
     assert abort_reason(hist) is None
+
+
+def test_entry_averages_k_rollouts_of_the_pinned_day():
+    # Finding 4: grpo3 died on spotchecks 1.0, 1.0, 0.05 -- three different days at
+    # ONE sampled rollout each, so a single unlucky draw gated a GPU window. Each tick
+    # must carry the mean over k rollouts of one fixed day.
+    e = spotcheck_entry(step=20, train_reward=0.5, truncated_rate=0.1,
+                        totals=[1.0, 1.0, 0.05, 0.95],
+                        token_counts=[400, 380, 420, 400], ref_tokens=400)
+    assert e["spotcheck_total"] == 0.75
+    assert e["tokens"] == 400
+    assert e["ref_tokens"] == 400
+    assert e["rollouts"] == 4
+
+
+def test_day_hopping_n1_spotchecks_abort_on_noise():
+    # the grpo3 killer, preserved as documentation: train climbing while three
+    # DIFFERENT days are sampled ONCE each. The 0.05 is a single penalty-heavy
+    # draw from a hard day -- indistinguishable from divergence under this input.
+    hist = [tick(20, 0.40, 1.00), tick(40, 0.60, 1.00), tick(60, 0.78, 0.05)]
+    assert "reward" in abort_reason(hist)
+
+
+def test_one_bad_rollout_cannot_gate_a_window():
+    # the SAME training climb measured the fixed way: every tick a 4-rollout mean
+    # of one pinned day. A catastrophic draw (0.05, the grpo3 value) lands inside
+    # a tick and is absorbed by the other three; endpoint means hold, window stays.
+    hist = [
+        spotcheck_entry(20, 0.40, 0.0, [0.90, 0.95, 0.95, 1.00], [400] * 4, 400),
+        spotcheck_entry(40, 0.60, 0.0, [0.05, 1.00, 1.00, 1.00], [400] * 4, 400),
+        spotcheck_entry(60, 0.78, 0.0, [0.95, 1.00, 0.95, 1.00], [400] * 4, 400),
+    ]
+    assert abort_reason(hist) is None
+
+
+def test_real_same_day_regression_still_aborts():
+    # denoising must not blind the guard: a persistent drop across ticks of the SAME
+    # day is genuine divergence, and train climbing through it is exactly the tell
+    hist = [
+        spotcheck_entry(20, 0.40, 0.0, [0.95, 0.90, 0.95, 0.90], [400] * 4, 400),
+        spotcheck_entry(40, 0.62, 0.0, [0.60, 0.55, 0.65, 0.60], [380] * 4, 400),
+        spotcheck_entry(60, 0.80, 0.0, [0.30, 0.25, 0.35, 0.30], [350] * 4, 400),
+    ]
+    assert "reward" in abort_reason(hist)
