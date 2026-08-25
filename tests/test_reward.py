@@ -109,6 +109,41 @@ def test_no_sections_zero_grounding():
     assert score_digest(bare, ACTIVITY)["grounding"] == 0.0
 
 
+def test_busy_repo_invented_claim_not_grounded():
+    # a repo with many distinct commits gives a large aggregate token pool. grounding
+    # counts overlap against that whole pool, so real words scattered across unrelated
+    # commits can be recombined into a claim none of them made, and still clear the
+    # per-target token count -- observed live from a trained checkpoint (digest-grpo),
+    # not a synthetic worst case.
+    busy = {"usr-wwelsh/digest-finetune": {"commits": [
+        {"sha": "1", "message": "feat: penalize truncated rollouts, add mid-training spotcheck + per-component logging"},
+        {"sha": "2", "message": "fix: rework grounding scoring, drop repetition score, rebalance weights"},
+        {"sha": "3", "message": "chore: gitignore local colab notebook copy"},
+        {"sha": "4", "message": "feat: add --tokenizer override and mean-reward summary to eval_reward"},
+        {"sha": "5", "message": "docs: link HF weights, note GRPO collapse cause"},
+        {"sha": "6", "message": "fix: raise completion cap, mask truncated completions, eval on held-out set"},
+        {"sha": "7", "message": "fix: soften binary format gate, penalize duplicate sections, widen GRPO groups"},
+        {"sha": "8", "message": "fix grpo reward activity unpacking, add CUDA/bf16 autodetect"},
+        {"sha": "9", "message": "include dataset, fix git-digest link"},
+        {"sha": "10", "message": "init"},
+    ]}}
+    invented = """# Developer Journal
+
+## Summary
+
+digest-finetune expanded its reward summary this cycle.
+
+## Per-Repo Activity
+
+### usr-wwelsh/digest-finetune
+
+Pulled the penalty-based feedback loop and extended the reward summary to account
+for multiple paths to the same goal. The new summary now reports each completion
+separately rather than grouping them all together as a single value.
+"""
+    assert score_digest(invented, busy)["grounding"] < 0.5
+
+
 def test_missing_repo_section_fails_coverage():
     bad = GOOD.replace("### usr-wwelsh/botdocs\n\nAdded a sitemap generator feature.\n", "")
     assert score_digest(bad, ACTIVITY)["coverage"] < 1.0

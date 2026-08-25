@@ -192,6 +192,30 @@ def source_tokens(activity: dict, repo: str) -> set[str]:
     return toks
 
 
+def per_commit_source_tokens(activity: dict, repo: str) -> list[set[str]]:
+    """Same material as source_tokens, kept per-commit and WITHOUT the repo-name
+    tokens (those are constant across every commit and would pad every commit's
+    apparent size the same way, defeating the size-scaled target below). A busy
+    repo's pooled vocabulary lets scattered real words from unrelated commits get
+    recombined into a claim none of them made and still clear the overlap bar --
+    scoring grounding against the best single commit match closes that: credit
+    still requires the body to connect to one real change, not the whole pool."""
+    data = activity.get(repo) or {}
+    show_patches = include_patches(activity)
+    out = []
+    for c in data.get("commits", []):
+        toks = content_tokens(c.get("message", ""))
+        for f in c.get("files", []):
+            fname = f.get("filename", "")
+            if not fname or is_low_signal_file(fname):
+                continue
+            toks |= content_tokens(fname)
+            if show_patches:
+                toks |= content_tokens(f.get("patch", ""))
+        out.append(toks)
+    return out or [content_tokens(repo)]
+
+
 def format_score(digest: str, repos: list[str], activity: dict) -> float:
     """The summary gate checks groundedness too: a fluent-but-unrelated summary is the
     cheapest fabrication channel in the format (never verified otherwise), so require
@@ -256,11 +280,20 @@ def grounding_score(digest: str, activity: dict, target: int = 5) -> float:
         if rn not in hits:
             continue
         toks = content_tokens(body)
-        ov = len(toks & source_tokens(activity, match))
-        hit = min(1.0, ov / target)
+        repo_toks = content_tokens(match)
+        # target scales down to a short commit's own vocabulary so a tight, honest
+        # quote of a 3-word message can still reach the ceiling -- a fixed target=5
+        # was only reachable before because the old pooled-union scoring quietly
+        # borrowed vocabulary from a repo's OTHER commits to make up the difference.
+        hit, best_ov = 0.0, 0
+        for ct in per_commit_source_tokens(activity, match):
+            local_target = max(2, min(target, len(ct)))
+            ov = len(toks & (ct | repo_toks))
+            if min(1.0, ov / local_target) > hit:
+                hit, best_ov = min(1.0, ov / local_target), ov
         # a section mostly made of source words is a copy/dump, not prose --
         # verbatim commit lists and keyword dumps otherwise max this score
-        if len(toks) >= 6 and ov > 0.6 * len(toks):
+        if len(toks) >= 6 and best_ov > 0.6 * len(toks):
             hit *= 0.5
         hits[rn] = max(hits[rn], hit)
     return sum(hits.values()) / len(hits)
