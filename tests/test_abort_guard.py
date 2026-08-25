@@ -6,9 +6,9 @@ sys.path.insert(0, str(Path(__file__).parent.parent / "scripts"))
 from grpo import abort_reason  # noqa: E402
 
 
-def tick(step, train, spot, tokens=400, trunc=0.0):
+def tick(step, train, spot, tokens=400, ref=400, trunc=0.0):
     return {"step": step, "train_reward": train, "spotcheck_total": spot,
-            "tokens": tokens, "truncated_rate": trunc}
+            "tokens": tokens, "ref_tokens": ref, "truncated_rate": trunc}
 
 
 def test_healthy_run_is_not_aborted():
@@ -44,8 +44,8 @@ def test_sustained_length_collapse_aborts():
 
 
 def test_steady_short_output_is_a_style_not_a_collapse():
-    hist = [tick(1, 0.40, 0.50, tokens=180), tick(2, 0.45, 0.52, tokens=175),
-            tick(3, 0.50, 0.54, tokens=170)]
+    hist = [tick(1, 0.40, 0.50, tokens=180, ref=180), tick(2, 0.45, 0.52, tokens=175, ref=180),
+            tick(3, 0.50, 0.54, tokens=170, ref=180)]
     assert abort_reason(hist) is None
 
 
@@ -54,6 +54,23 @@ def test_one_short_spotcheck_day_does_not_abort():
     hist = [tick(1, 0.40, 0.50, tokens=400), tick(2, 0.45, 0.52, tokens=90),
             tick(3, 0.50, 0.54, tokens=390)]
     assert abort_reason(hist) is None
+
+
+def test_short_days_in_a_row_are_not_a_collapse_when_their_labels_are_short():
+    # the real eval set's reference digests run 133-316 tokens and the spotcheck cycles
+    # them in order, so rows 3-5 are three genuinely short days back to back. Judged
+    # against a cross-day peak (316) that read as collapse; judged against each day's own
+    # label it is a policy tracking its targets.
+    hist = [tick(1, 0.40, 0.50, tokens=204, ref=204), tick(2, 0.45, 0.52, tokens=133, ref=133),
+            tick(3, 0.50, 0.54, tokens=150, ref=150)]
+    assert abort_reason(hist) is None
+
+
+def test_collapse_on_a_long_day_aborts_even_after_short_days():
+    # the mirror case: absolute token counts alone can't tell these two apart
+    hist = [tick(1, 0.40, 0.50, tokens=133, ref=133), tick(2, 0.45, 0.52, tokens=60, ref=316),
+            tick(3, 0.50, 0.54, tokens=55, ref=292)]
+    assert "length" in abort_reason(hist)
 
 
 def test_sustained_truncation_aborts():

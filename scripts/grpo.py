@@ -33,13 +33,15 @@ def abort_reason(history: list[dict], patience: int = 3, min_train_gain: float =
         return (f"train reward +{train_gain:.3f} while held-out spotcheck "
                 f"{heldout_gain:+.3f} over {patience} checks -- fitting the scorer, not the task")
 
-    # peak-relative and averaged: spotcheck cycles held-out days, so one quiet day is
-    # legitimately short and only a sustained drop from the best seen counts
-    peak = max(h["tokens"] for h in history)
-    mean_tokens = sum(h["tokens"] for h in win) / patience
-    if peak and mean_tokens < length_floor * peak:
-        return (f"completion length collapsed: mean {mean_tokens:.0f} tokens over "
-                f"{patience} checks vs peak {peak}")
+    # day-relative, not peak-relative: the spotcheck cycles held-out days whose reference
+    # digests run 133-316 tokens, so a cross-day peak conflated "quiet day" with "collapsed
+    # policy" -- three short days after one long one could abort a healthy run. Judge each
+    # tick against its own day's label length instead, then average.
+    ratios = [h["tokens"] / h["ref_tokens"] for h in win if h.get("ref_tokens")]
+    mean_ratio = sum(ratios) / len(ratios) if ratios else None
+    if mean_ratio is not None and mean_ratio < length_floor:
+        return (f"completion length collapsed: mean {mean_ratio:.0%} of the reference "
+                f"digest length over {patience} checks")
 
     mean_trunc = sum(h["truncated_rate"] for h in win) / patience
     if mean_trunc > trunc_ceiling:
@@ -154,7 +156,9 @@ def main() -> None:
             # length rather than collapse. Only the rollout truncation rate was left.
             truncated = n_new >= args.max_completion
             s = score_digest(text, row["activity"], truncated=truncated)
+            ref = len(self.tok(row["completion"]).input_ids)
             print(f"\n[spotcheck {row['date']}] {json.dumps(s)} tokens={n_new}"
+                  f" ({n_new / ref:.0%} of reference {ref})"
                   f"{' TRUNCATED' if truncated else ''}")
             print("  " + text[:200].replace("\n", " "))
             model.train(was_training)
@@ -170,6 +174,7 @@ def main() -> None:
                 "train_reward": sum(r for r, _ in seen) / len(seen),
                 "spotcheck_total": s["total"],
                 "tokens": n_new,
+                "ref_tokens": len(self.tok(row["completion"]).input_ids),
                 "truncated_rate": sum(t for _, t in seen) / len(seen),
             })
             why = abort_reason(self.history, patience=args.abort_patience)
