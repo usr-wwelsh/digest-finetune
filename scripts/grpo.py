@@ -105,7 +105,8 @@ def spotcheck_entry(step: int, train_reward: float, truncated_rate: float,
 
 
 def abort_reason(history: list[dict], patience: int = 3, min_train_gain: float = 0.05,
-                 length_floor: float = 0.5, trunc_ceiling: float = 0.5) -> str | None:
+                 heldout_drop: float = 0.10, length_floor: float = 0.5,
+                 trunc_ceiling: float = 0.5) -> str | None:
     """Why this run should stop, or None to keep going.
 
     GRPO against a lexical reward fails in ways the reward itself cannot see, so these
@@ -113,14 +114,23 @@ def abort_reason(history: list[dict], patience: int = 3, min_train_gain: float =
     last `patience` ticks, so a run that stalls and then recovers isn't held to it.
     Every history entry must come from spotcheck_entry(): same pinned day per tick,
     k-rollout means -- comparing raw single-draw scores across different days is how
-    grpo3 aborted on noise."""
+    grpo3 aborted on noise. Divergence needs a held-out drop of `heldout_drop`, not
+    merely the absence of a gain: a pinned day the policy already scores near the
+    ceiling on has no room to gain, so `<= 0` reads "flat" as "diverging"."""
     if len(history) < patience:
         return None
     win = history[-patience:]
 
     train_gain = win[-1]["train_reward"] - win[0]["train_reward"]
     heldout_gain = win[-1]["spotcheck_total"] - win[0]["spotcheck_total"]
-    if train_gain >= min_train_gain and heldout_gain <= 0:
+    # a real drop, not just the absence of a gain: at k=4 the pinned-day mean is
+    # quantized to 0.075 steps, and `<= 0` charged every exact tie as divergence.
+    # Measured on sft3's own day-0 rollouts (draws 0.7/1.0, mean 0.85) against grpo3's
+    # per-step train rewards, a FLAT policy tripped `<= 0` in 59% of simulated 6-tick
+    # runs -- the k-rollout fix alone only moved that from 66%. A 0.10 band puts it at
+    # 16% while a genuine pinned-day collapse (0.95 -> 0.30) is still caught 99.5% of
+    # the time, so the band costs no detection.
+    if train_gain >= min_train_gain and heldout_gain <= -heldout_drop:
         return (f"train reward +{train_gain:.3f} while held-out spotcheck "
                 f"{heldout_gain:+.3f} over {patience} checks -- fitting the scorer, not the task")
 

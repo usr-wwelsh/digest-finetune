@@ -21,9 +21,42 @@ def test_short_history_never_aborts():
     assert abort_reason(hist) is None
 
 
-def test_train_reward_climbing_while_heldout_stalls_aborts():
-    hist = [tick(1, 0.40, 0.55), tick(2, 0.60, 0.54), tick(3, 0.78, 0.53)]
+def test_train_reward_climbing_while_heldout_drops_aborts():
+    hist = [tick(1, 0.40, 0.55), tick(2, 0.60, 0.48), tick(3, 0.78, 0.40)]
     assert "reward" in abort_reason(hist)
+
+
+def test_flat_heldout_under_a_climbing_train_reward_is_not_divergence():
+    # the grpo3 false positive in its general form: a pinned day the policy already
+    # scores 0.85 on has little room to gain, so "held-out didn't rise" is the normal
+    # case, not evidence of fitting the scorer. Only a real drop is.
+    hist = [tick(1, 0.40, 0.85), tick(2, 0.60, 0.85), tick(3, 0.78, 0.85)]
+    assert abort_reason(hist) is None
+
+
+def test_heldout_drop_boundary_is_straddled():
+    # either side of the 0.10 band: widening it starts ignoring real divergence,
+    # narrowing it starts aborting on the tick-to-tick wobble of a flat policy.
+    # Straddled rather than pinned on the value itself -- a drop of exactly the band
+    # is 0.80 - 0.90 == -0.09999999999999998 in floats, so an == boundary test would
+    # assert a property of binary representation rather than of the guard.
+    assert "reward" in abort_reason(
+        [tick(1, 0.40, 0.90), tick(2, 0.60, 0.84), tick(3, 0.78, 0.78)])
+    assert abort_reason(
+        [tick(1, 0.40, 0.90), tick(2, 0.60, 0.86), tick(3, 0.78, 0.82)]) is None
+
+
+def test_one_flipped_rollout_of_the_pinned_day_is_inside_the_band():
+    # at k=4 with day-0's observed 0.7/1.0 draws the tick mean moves in 0.075 steps,
+    # so one rollout flipping between ticks is a 0.075 swing -- under the band by
+    # design, since that is sampling noise and not a policy change
+    hist = [
+        spotcheck_entry(20, 0.40, 0.0, [1.0, 1.0, 0.7, 1.0], [200] * 4, 200),
+        spotcheck_entry(40, 0.60, 0.0, [1.0, 0.7, 0.7, 1.0], [200] * 4, 200),
+        spotcheck_entry(60, 0.78, 0.0, [0.7, 0.7, 1.0, 1.0], [200] * 4, 200),
+    ]
+    assert abort_reason(hist) is None
+
 
 
 def test_heldout_gain_excuses_a_climbing_train_reward():
