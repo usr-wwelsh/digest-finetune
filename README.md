@@ -135,7 +135,11 @@ so digest writing runs offline on CPU — eventually bundled into git-digest its
   40-step run could not have produced a measurable delta. The conservative LR was chosen because
   the first GRPO run collapsed at a higher rate, but that run had 4 generations, a binary format
   gate and 50-88% truncation; none of that describes the current setup (`reward_std` 0.23, zero
-  truncation, `beta=0.1`). Treat the LR as the next thing to change, the way it was for `sft3`.
+  truncation, `beta=0.1`). Note the direction: `kl` went 0.0041 -> 0.0028, it *declined*. A
+  too-small LR would show KL climbing slowly; flat-to-declining KL is the signature of the KL
+  penalty holding an equilibrium, so `beta` is as likely the binding constraint as `lr`. The
+  notebook raises `LR` to 3e-5 first because `beta=0.1` still bounds the damage — if `kl` pins
+  near 0.003 at that rate too, beta is confirmed and comes down next. One variable at a time.
 - **The reward saturates rather than being gamed.** `fuzz_reward.py` passes clean (317 adversarial
   inputs, 0 violations) and the teacher's own labels average 0.978, so 1.000 spotchecks are the
   ceiling being reachable, not the scorer being exploited. But `frac_reward_zero_std` hit 1 on 2
