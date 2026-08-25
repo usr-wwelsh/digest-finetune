@@ -32,6 +32,25 @@ NON_FILE_DOTTED_NAMES = {
 }
 FILE_MENTION_RE = re.compile(r"\b[\w][\w/-]*\.([A-Za-z]{1,10})\b")
 
+NUMBER_WORDS = {"zero": 0, "one": 1, "two": 2, "three": 3, "four": 4, "five": 5,
+                "six": 6, "seven": 7, "eight": 8, "nine": 9, "ten": 10,
+                "eleven": 11, "twelve": 12}
+COUNT_CLAIM_RE = re.compile(
+    r"\b(\d{1,3}|" + "|".join(NUMBER_WORDS) + r")\s+(?:active\s+|git\s+)*"
+    r"(?:repos?|repositories?|projects?)\b", re.IGNORECASE)
+
+# Finding 3's observed lie has a specific shape: a generation scoring 1.000 called
+# the model GPT-2 while weaving real stat numbers through invented claims. The stack
+# here is local SmolLM or the Haiku teacher -- a journal naming some OTHER assistant
+# is always fabricating identity, and prompts contain none of these names. The broad
+# version of this idea ("any capitalised token absent from the prompt") measured dead
+# on the 109-row corpus: 52 rows legitimately name tech entities (Docker, Svelte,
+# JWT, Mux...) their day's prompt never mentions. A closed class keeps precision.
+MODEL_NAME_RE = re.compile(
+    r"\b(gpt(?:[- ]?\d[\w.]*)?|chatgpt|openai|anthropic|claude|gemini|bard|grok"
+    r"|mistral|deepseek|qwen(?:\d[\w.]*)?|gemma\d*|cohere|llama(?!\.?cpp))\b",
+    re.IGNORECASE)
+
 
 def real_filenames(activity: dict) -> set[str]:
     """Filenames the model could plausibly cite: diffed files, plus any filename-shaped
@@ -59,6 +78,40 @@ def fabricated_file_mentions(body: str, real: set[str]) -> int:
         if mentioned in NON_FILE_DOTTED_NAMES or mentioned in real:
             continue
         count += 1
+    return count
+
+
+def fabricated_model_names(summary: str, sections: list[tuple[str, str]],
+                           repos: list[str], activity: dict) -> set[str]:
+    """Model/assistant names the prompt never mentions. Grounded escape: a name whose
+    alnum or first-word form appears in any repo's prompt material is legitimate
+    (e.g. a migration commit genuinely touching GPT-2 files)."""
+    surface: set[str] = set()
+    for r in repos:
+        surface |= _prompt_surface_words(activity, r)
+        surface |= set(WORD_RE.findall(r.lower()))
+    found = set()
+    for prose in [summary] + [b for _, b in sections]:
+        for m in MODEL_NAME_RE.finditer(prose):
+            name = m.group(0)
+            key = re.sub(r"[^a-z0-9]", "", name.lower())
+            first = WORD_RE.findall(name.lower())[0]
+            if key in surface or first in surface:
+                continue
+            found.add(name)
+    return found
+
+
+def fabricated_count_claims(prose: str, n_repos: int) -> int:
+    """"Three active repos" / "Two active projects" / "5 repositories" -- headline
+    arithmetic checkable straight against the activity dict, position-independent
+    (these lies open sentences, so the capitalised-entity rule never sees them)."""
+    count = 0
+    for m in COUNT_CLAIM_RE.finditer(prose):
+        tok = m.group(1).lower()
+        claimed = int(tok) if tok.isdigit() else NUMBER_WORDS[tok]
+        if claimed != n_repos:
+            count += 1
     return count
 
 
@@ -231,6 +284,16 @@ def _repetition_ratio(text: str) -> float:
     return len(set(grams)) / len(grams)
 
 
+def _shared_run(a: str, b: str, n: int = 10) -> tuple[str, ...] | None:
+    """First verbatim word-run of length >= n shared by a and b, or None."""
+    wa, wb = WORD_RE.findall(a.lower()), WORD_RE.findall(b.lower())
+    if len(wa) < n or len(wb) < n:
+        return None
+    grams = {tuple(wa[i:i + n]) for i in range(len(wa) - n + 1)}
+    return next((tuple(wb[i:i + n]) for i in range(len(wb) - n + 1)
+                 if tuple(wb[i:i + n]) in grams), None)
+
+
 def _shares_long_span(a: str, b: str, n: int = 10) -> bool:
     """True if a and b share a run of n words. Reworded prose does not.
 
@@ -238,14 +301,39 @@ def _shares_long_span(a: str, b: str, n: int = 10) -> bool:
     summary/body run is 9 words (2026-08-14-synth5), while the sft3 echoes run
     31, 28, and 10. The margin is one word, so test_summary_echo_boundary pins
     both sides -- widening this rule starts penalising real teacher digests."""
-    wa, wb = WORD_RE.findall(a.lower()), WORD_RE.findall(b.lower())
-    if len(wa) < n or len(wb) < n:
-        return False
-    grams = {tuple(wa[i:i + n]) for i in range(len(wa) - n + 1)}
-    return any(tuple(wb[i:i + n]) in grams for i in range(len(wb) - n + 1))
+    return _shared_run(a, b, n) is not None
 
 
-def penalties(digest: str, summary: str, sections: list[tuple[str, str]], repos: list[str], activity: dict) -> float:
+def _prompt_surface_words(activity: dict, repo: str) -> set[str]:
+    """Raw (unstemmed) lowercase words the prompt actually showed for this repo --
+    commit messages and filenames always, diff text only when include_patches() says
+    the prompt showed diffs. Used to tell a quoted commit subject from an echoed
+    invention."""
+    data = activity.get(repo) or {}
+    words: set[str] = set()
+    show_patches = include_patches(activity)
+    for c in data.get("commits", []):
+        words |= set(WORD_RE.findall(c.get("message", "").lower()))
+        for f in c.get("files", []):
+            fname = f.get("filename", "")
+            if fname and not is_low_signal_file(fname):
+                words |= set(WORD_RE.findall(fname.lower()))
+                if show_patches:
+                    words |= set(WORD_RE.findall(f.get("patch", "").lower()))
+    return words
+
+
+def _run_is_quoted(run: tuple[str, ...], surface: set[str]) -> bool:
+    """True when every content-bearing word of the shared run appears in the prompt's
+    surface vocabulary -- i.e. the echo restates material the model was shown.
+    Content-bearing excludes stopwords/short tokens so a run can't pass on filler;
+    a run with none (impossible at n=10 in practice) is treated as not quoted."""
+    content = [w for w in run if len(w) >= 3 and w not in STOPWORDS]
+    return bool(content) and all(w in surface for w in content)
+
+
+def penalties(digest: str, summary: str, sections: list[tuple[str, str]], repos: list[str],
+              activity: dict, previous: str | None = None) -> float:
     low = digest.lower()
     p = sum(1 for b in BANNED if b in low) * 0.5
 
@@ -255,13 +343,31 @@ def penalties(digest: str, summary: str, sections: list[tuple[str, str]], repos:
         + sum(fabricated_file_mentions(b, real) for _, b in sections)
     p += min(0.5, fabricated * 0.3)
 
+    # Finding 3: a generation scoring 1.000 called the model GPT-2 while weaving
+    # real stat numbers through invented claims. Any model/assistant name absent
+    # from the prompt is that lie; charge each distinct invention once.
+    entities = fabricated_model_names(summary, sections, repos, activity)
+    p += min(0.5, len(entities) * 0.3)
+
+    # "Three active repos" over a one-repo day: headline arithmetic contradicting
+    # the activity dict itself
+    count_lies = fabricated_count_claims(summary, len(repos)) \
+        + sum(fabricated_count_claims(b, len(repos)) for _, b in sections)
+    p += min(0.5, count_lies * 0.3)
+
     headers = [n for n, _ in sections]
     if len(set(headers)) < len(headers):
         p += 0.5
 
+    # Counting *extra* sections past len(repos) missed substitution entirely: renaming
+    # a real repo's header to a repo that never ran kept the count equal and cost
+    # nothing -- and a fabricated header misattributes a whole day of work, which is
+    # exactly what the preamble-plagiarism samples did (0.15/section was cheaper than
+    # ONE hallucinated filename). Charge every header naming a non-existent repo;
+    # a headline lie costs 0.35, two fabricate an entire journal.
     allowed = {norm_repo(r) for r in repos}
-    excess = max(0, len(headers) - len(allowed))
-    p += min(0.5, excess * 0.15)
+    fabricated_headers = sum(1 for n, _ in sections if norm_repo(n) not in allowed)
+    p += min(0.75, fabricated_headers * 0.35)
 
     bodies = [content_tokens(b) for _, b in sections]
     near_dup = False
@@ -281,24 +387,45 @@ def penalties(digest: str, summary: str, sections: list[tuple[str, str]], repos:
     # pairwise. Jaccard cannot separate this: a solo-repo day legitimately rewords
     # the summary into its one body at 0.615, barely under a copy-paste at 0.667.
     # Verbatim span reuse is the honest signal -- rewording never keeps 8 words in
-    # a row, and copy-paste keeps whole sentences.
-    if any(_shares_long_span(summary, b) for _, b in sections):
+    # a row, and copy-paste keeps whole sentences. One exception: the most accurate
+    # sft3 sample scored lowest precisely because it restated a true commit subject
+    # ("raise the GRPO LR to 3e-5") in both places -- so a run whose content words
+    # all trace to that repo's prompt material is a quote, not an echo. Sections
+    # with no real repo to ground against stay chargeable.
+    for name, body in sections:
+        run = _shared_run(summary, body)
+        if not run:
+            continue
+        match = next((r for r in activity if norm_repo(r) == norm_repo(name)), None)
+        if match and _run_is_quoted(run, _prompt_surface_words(activity, match)):
+            continue
         p += 0.3
+        break
 
     # charge self-repetition once, however many sections loop
     if any(_repetition_ratio(t) < 0.5 for t in [summary] + [b for _, b in sections]):
         p += 0.4
 
+    # production prepends yesterday's digest as a style reference; a generation that
+    # lifts it wholesale scores ~0.80 against unrelated commits (format + saturated
+    # grounding), so the scorer must see what the model saw. Same calibrated n=10:
+    # reworded prose never keeps a 10-word run, consecutive days share vocabulary only.
+    # Charged unconditionally -- unlike summary/body echoes, no source-grounding
+    # exemption exists: `previous` is not part of today's prompt material.
+    if previous and _shares_long_span(digest, previous):
+        p += 0.3
+
     return min(1.0, p)
 
 
-def score_digest(digest: str, activity: dict, truncated: bool = False) -> dict:
+def score_digest(digest: str, activity: dict, truncated: bool = False,
+                 previous: str | None = None) -> dict:
     repos = list(activity.keys())
     summary, sections = parse_sections(digest)
     f = format_score(digest, repos, activity)
     c = coverage_score(digest, activity)
     g = grounding_score(digest, activity)
-    p = penalties(digest, summary, sections, repos, activity)
+    p = penalties(digest, summary, sections, repos, activity, previous=previous)
     # running into the token cap means the digest never finished; callers that
     # know the generation length pass this in, and it defaults off for scoring
     # reference completions that were never generated

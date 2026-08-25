@@ -149,6 +149,133 @@ Removed build warnings and switched systemd unit resolution to absolute paths.
     assert s["total"] < score_digest(GOOD, ACTIVITY)["total"]
 
 
+def test_one_fabricated_header_costs_like_a_headline_lie():
+    # Finding 2: the 1.000-scoring sample attributed yesterday's omniMux work to a
+    # repo that never ran that day; under 0.15/section, misattributing a whole day's
+    # work was cheaper than a single hallucinated filename (0.3). Price it like the
+    # headline lie it is.
+    miscamed = GOOD.replace("### usr-wwelsh/botdocs", "### usr-wwelsh/not-a-real-repo")
+    s = score_digest(miscamed, ACTIVITY)
+    assert s["penalties"] >= 0.35
+
+
+def test_two_fabricated_headers_dominate_the_score():
+    double = GOOD.replace(
+        "### usr-wwelsh/botdocs", "### usr-wwelsh/not-real").replace(
+        "Added a sitemap generator feature.",
+        "Removed build warnings and switched systemd unit resolution to absolute paths."
+    ) + "\n### usr-wwelsh/also-fake\n\nMore filler prose claiming unrelated work happened here.\n"
+    s = score_digest(double, ACTIVITY)
+    assert s["penalties"] >= 0.7
+    assert s["total"] < 0.5
+
+
+def test_invented_model_name_penalized():
+    # Finding 3: a generation scoring 1.000 called the model GPT-2 -- a capitalised
+    # proper noun absent from every byte of its prompt. The scorer must notice.
+    invented = GOOD.replace(
+        "Removed build warnings and switched systemd unit resolution to absolute paths.",
+        "Removed build warnings using GPT-2 embeddings and switched systemd paths.")
+    s = score_digest(invented, ACTIVITY)
+    assert s["penalties"] > 0
+    assert s["total"] < score_digest(GOOD, ACTIVITY)["total"]
+
+
+def test_model_name_present_in_prompt_not_penalized():
+    # the same shape becomes legitimate the moment the prompt itself names the model
+    grounded_activity = {
+        "usr-wwelsh/turbolab": {"commits": [
+            {"sha": "ac4a9c1", "message": "chore: build warning fixes"},
+            {"sha": "d49b6c9", "message": "fix: systemd absolute path"},
+            {"sha": "e777777", "message": "chore: bump smollm2 tokenizer"},
+        ]},
+        "usr-wwelsh/botdocs": ACTIVITY["usr-wwelsh/botdocs"],
+    }
+    named = GOOD.replace(
+        "Removed build warnings and switched systemd unit resolution to absolute paths.",
+        "Removed build warnings and refreshed the SmolLM2 tokenizer paths.")
+    assert score_digest(named, grounded_activity)["penalties"] == 0.0
+
+
+def test_sentence_start_capital_not_penalized():
+    # ordinary prose starts sentences with capitals; only mid-sentence proper nouns
+    # absent from the prompt are fabrication candidates
+    plain = GOOD.replace(
+        "Removed build warnings and switched systemd unit resolution to absolute paths.",
+        "Systemd units now resolve through absolute paths, closing the warning batch.")
+    assert score_digest(plain, ACTIVITY)["penalties"] == 0.0
+
+
+def test_wrong_repo_count_claim_penalized():
+    # Finding 3: "Two active projects today" over a one-repo day, "Three active
+    # repos" in the body -- headline arithmetic the activity dict flatly contradicts
+    liar = GOOD.replace(
+        "Turbolab cleaned up build warnings and fixed systemd absolute path handling. "
+        "botdocs gained a sitemap generator.",
+        "Three active repositories shipped work today across the board.")
+    s = score_digest(liar, ACTIVITY)
+    assert s["penalties"] > 0
+    assert s["total"] < score_digest(GOOD, ACTIVITY)["total"]
+
+
+def test_correct_repo_count_claim_not_penalized():
+    counted = GOOD.replace(
+        "Turbolab cleaned up build warnings and fixed systemd absolute path handling. "
+        "botdocs gained a sitemap generator.",
+        "Two active repositories shipped work today across the board.")
+    assert score_digest(counted, ACTIVITY)["penalties"] == 0.0
+
+
+QUOTE_ACTIVITY = {
+    "usr-wwelsh/turbolab": {"commits": [
+        {"sha": "ac4a9c1", "message": "chore: build warning fixes"},
+        {"sha": "d49b6c9", "message": "fix: systemd absolute path"},
+        {"sha": "e555555", "message": "chore: raised the grpo learning rate to "
+                                     "3e-5 before the next training window"},
+    ]},
+}
+
+
+def test_verbatim_quote_of_commit_subject_not_penalized():
+    # Finding 3 inversion: the only sample that accurately tracked "raise the GRPO LR
+    # to 3e-5" scored LOWEST because restating one true thing tripped the summary/body
+    # echo penalty. Quoting the prompt's own words is accuracy, not self-plagiarism --
+    # the exemption belongs where the shared run traces to real commit material.
+    quoted = """# Developer Journal
+
+## Summary
+
+Turbolab raised the grpo learning rate to 3e-5 before the next training window today.
+
+## Per-Repo Activity
+
+### usr-wwelsh/turbolab
+
+Raised the grpo learning rate to 3e-5 before the next training window, alongside
+the systemd path cleanup.
+"""
+    s = score_digest(quoted, QUOTE_ACTIVITY)
+    assert s["penalties"] == 0.0
+
+
+def test_verbatim_quote_of_invented_text_still_penalized():
+    # the mirror: an identical echo with NO source to ground it stays charged
+    invented = """# Developer Journal
+
+## Summary
+
+The pipeline now handles backpressure across every consumer queue gracefully today.
+
+## Per-Repo Activity
+
+### usr-wwelsh/turbolab
+
+The pipeline now handles backpressure across every consumer queue gracefully.
+"""
+    s = score_digest(invented, ACTIVITY)
+    assert s["penalties"] > 0
+
+
 def test_empty_body_section_fails_coverage():
     gamed = """# Developer Journal
 
@@ -527,3 +654,78 @@ def test_summary_echo_boundary():
     # ran 31, 28 and 10. One word of margin, so pin both sides.
     assert score_digest(_digest_with_shared_run(9), ACTIVITY)["penalties"] == 0.0
     assert score_digest(_digest_with_shared_run(10), ACTIVITY)["penalties"] > 0
+
+
+YESTERDAY = """# Developer Journal
+
+## Summary
+
+omniMux tightened its search pipeline and excluded unknown-artist downloads.
+
+## Per-Repo Activity
+
+### usr-wwelsh/omniMux
+
+Search now excludes unknown-artist downloads so the library stays clean.
+"""
+
+
+def test_lifted_previous_digest_penalized():
+    # Finding 2 (2026-08-24): production prepends yesterday's digest, and a sample
+    # lifted its body wholesale (a 47-word run), misattributed another repo's work,
+    # and scored 1.000 -- score_digest never saw the preamble, so copying beat
+    # every honest generation. Passing the preamble as `previous` must close that.
+    lifted = GOOD.replace(
+        "Removed build warnings and switched systemd unit resolution to absolute paths.",
+        "Search now excludes unknown-artist downloads so the library stays clean.")
+    without_prev = score_digest(lifted, ACTIVITY)
+    s = score_digest(lifted, ACTIVITY, previous=YESTERDAY)
+    assert s["penalties"] > without_prev["penalties"]
+    assert s["total"] < without_prev["total"]
+    assert s["total"] < score_digest(GOOD, ACTIVITY)["total"]
+
+
+def test_previous_default_off_is_backward_compatible():
+    # ~70 call sites pass only (digest, activity); the preamble path must be opt-in
+    assert score_digest(GOOD, ACTIVITY, previous=None) == score_digest(GOOD, ACTIVITY)
+
+
+def _digest_sharing_previous(run_words: int) -> tuple[str, str]:
+    # a shared verbatim run of exactly `run_words` words between yesterday's body
+    # and today's body, everything else independently worded
+    source = "uploads now retry with exponential backoff after a failed gateway round"
+    shared = " ".join(source.split()[:run_words])
+    previous = f"""# Developer Journal
+
+## Summary
+
+The media server saw steady progress on transfer robustness overall today.
+
+## Per-Repo Activity
+
+### usr-wwelsh/omniMux
+
+{source} trip behaviour hardened under load.
+"""
+    digest = f"""# Developer Journal
+
+## Summary
+
+Turbolab cleaned up build warnings and fixed systemd absolute path handling today.
+
+## Per-Repo Activity
+
+### usr-wwelsh/turbolab
+
+Network resilience work: {shared} trip handling got sturdier as well.
+"""
+    return digest, previous
+
+
+def test_previous_shared_run_boundary():
+    # the same calibrated n=10 margin as the summary echo rule: reworded cross-day
+    # prose shares vocabulary but never a 10-word verbatim run
+    nine_digest, nine_prev = _digest_sharing_previous(9)
+    ten_digest, ten_prev = _digest_sharing_previous(10)
+    assert score_digest(nine_digest, ACTIVITY, previous=nine_prev)["penalties"] == 0.0
+    assert score_digest(ten_digest, ACTIVITY, previous=ten_prev)["penalties"] > 0
