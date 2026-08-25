@@ -215,11 +215,23 @@ whole hazard is gone. Trade-off accepted: an interrupted run restarts from scrat
 **`grpo.py` can now stop itself.** `abort_reason()` judges the last `--abort-patience`
 spotchecks (default 3) and halts the run on any of:
 
-- training reward gaining ≥0.05 while the held-out spotcheck total is flat or falling —
+- training reward gaining ≥0.05 while the held-out spotcheck total *drops* by ≥0.10 —
   fitting the scorer rather than the task, which is the failure the reward cannot self-detect
-- mean completion length dropping below half its peak — measured peak-relative and averaged,
-  since the spotcheck cycles held-out days and one quiet day is legitimately short
+- mean completion length dropping below half the reference digest's — measured against each
+  day's own label, since a quiet day is legitimately short and a cross-day peak conflated the two
 - more than half of rollouts truncating at `--max-completion`
+
+**The guard's own false-positive rate is measured, not assumed.** grpo3 died at step 30 on
+spotchecks of 1.0, 1.0, 0.05 — three different days at one rollout each. Pinning the day and
+averaging `--spotcheck-gens` rollouts fixed the input; the rule still read "held-out failed to
+gain" as divergence, which a day the policy already scores ~0.85 on can never satisfy. Simulating
+a flat policy from sft3's own day-0 rollouts (draws 0.7/1.0) against grpo3's per-step training
+rewards: `<= 0` aborted 59% of 6-tick runs (66% at one rollout per tick), the ≥0.10 band 16%,
+while a genuine pinned-day collapse (0.95 → 0.30) is caught 99.5% of the time either way. The
+band costs no detection. Note the remaining 16% is dominated by window count — `--spotcheck-every 10`
+over 60 steps gives four overlapping windows; at `20` the same guard sits at 3%, but with
+`--abort-patience 3` its only window closes at the final step, which disables it rather than
+fixing it.
 
 An aborted run still saves its policy (`save_model` runs after `train()` returns), so the
 base-vs-result comparison works either way. `--beta` also moved 0.05 → 0.1: against a lexical, gameable reward the risk is drift from the
