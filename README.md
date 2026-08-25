@@ -245,15 +245,17 @@ notebook records what actually ran.
 
 - [usr-wwelsh/digest-sft2](https://huggingface.co/usr-wwelsh/digest-sft2) — SFT checkpoint, mean reward
   0.499 on held-out eval. **Stale**: trained on message-only prompts, predates the diff-aware
-  dataset fix (see Known issues). Superseded once `digest-sft3` lands.
-- [usr-wwelsh/digest-grpo](https://huggingface.co/usr-wwelsh/digest-grpo) — **stale**, published
-  2026-08-24 at revision `1cb58df` from a GRPO run on top of `digest-sft2`, which collapsed into
-  looping identical commit-sha sections. Its card advertises `0.4060` against an sft2 baseline of
-  `0.2634`; both came from the superseded scorer at `max_new=400` with a repetition penalty and
-  are not comparable to anything in the ladder above. The repo also still holds four
-  `checkpoint-N/` directories (~1.1GB) from that run. `colab/digest_grpo_colab.ipynb` overwrites
-  `main` and deletes those the next time a run beats its baseline; the old revision stays
-  pinnable either way.
+  dataset fix (see Known issues). Superseded by `digest-sft3`.
+- [usr-wwelsh/digest-sft3](https://huggingface.co/usr-wwelsh/digest-sft3) — **current release
+  candidate**. Diff-aware prompts, hardened reward. `0.8700` mean reward sampled
+  (`temperature=0.8`, matched 10-day held-out set, current `reward.py`).
+- [usr-wwelsh/digest-grpo](https://huggingface.co/usr-wwelsh/digest-grpo) — **dropped, not
+  in the release path**. `main` is a GRPO pass on top of `digest-sft3` that advertised
+  `+0.0125` over its baseline; re-evaled under the fixed reward (sampled, matched settings)
+  it scores `0.6844` against `sft3`'s `0.8700` — a regression, not a gain, once the reward
+  hole it was partly exploiting got closed. Kept published for the record, not for use.
+  The earlier revision `1cb58df` (GRPO on top of the now-superseded `digest-sft2`, which
+  collapsed into looping identical commit-sha sections) is unrelated and also not in use.
 
 ## Next steps
 
@@ -265,10 +267,29 @@ notebook records what actually ran.
       make `reward.py` diff-aware (see Known issues)
 - [x] Fuzz the reward (mutation + property tiers) and calibrate against teacher completions;
       fixed 4 holes found (summary fabrication, orphan prose, binary coverage, omission-paid)
-- [ ] Run `colab/digest_sft_colab.ipynb` — SFT on the diff-aware dataset, reward-based
-      checkpoint selection against both the untrained base and old `sft2`, push as `digest-sft3`
-      only if it wins
-- [ ] Point `colab/digest_grpo_colab.ipynb`'s `BASE_MODEL` at `digest-sft3`, rerun GRPO
+- [x] Run `colab/digest_sft_colab.ipynb` — SFT on the diff-aware dataset, reward-based
+      checkpoint selection against both the untrained base and old `sft2`, pushed as `digest-sft3`
+- [x] Point `colab/digest_grpo_colab.ipynb`'s `BASE_MODEL` at `digest-sft3`, rerun GRPO,
+      pushed as `digest-grpo` (+0.0125 over the sft3 baseline, greedy eval) — see open
+      question below before trusting that number
+- [x] Closed a grounding exploit: overlap was scored against a repo's whole commit pool,
+      so real vocabulary from unrelated commits could be recombined into an unsupported
+      claim on busy days and still clear the bar. Now scored against the best single
+      matching commit, with the target scaled to that commit's own vocabulary
+- [x] `digest_live.py` (replays production prompt-building against a real day's commits)
+      and `compare_teacher.py` (scores local checkpoints against the live teacher on
+      cached, resumable rollouts) for the eval sweep below
+- [x] **GRPO dropped.** Re-evaled `sft3` vs `grpo` under the fixed reward, sampled
+      (`temperature=0.8`) and matched on the full 10-day held-out set: `sft3` **0.8700**
+      vs `grpo` **0.6844** — GRPO scores worse than the checkpoint it trained on top of,
+      with 0% truncation on both sides so it isn't a decoding artifact. The `+0.0125`
+      it advertised was measured against the reward hole above; closing that hole
+      exposed a real regression, not noise. Not rerunning GRPO against the fixed
+      reward either: this is the second run on this project to score well against a
+      reward that had a real hole in it, which points at RL finding shortcuts faster
+      than a 135M model can learn precise multi-commit grounding, not bad luck twice.
+- [ ] Ship `digest-sft3` (`temperature=0.8`) + best-of-N sampling with `reward.py` as
+      verifier — pipe into `git-digest` as the local backend
 - [ ] Eval sweep: sampling configs on best checkpoint, pick release candidate
 - [ ] HF release; later GGUF bundling into git-digest
 
