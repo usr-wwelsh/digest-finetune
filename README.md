@@ -113,6 +113,38 @@ so digest writing runs offline on CPU — eventually bundled into git-digest its
   can still score close to honest prose (~0.85 vs ~0.9-1.0) since `coverage` is a binary
   per-repo gate rather than continuous — watch the GRPO spotcheck's per-component grounding
   score for drift toward short/sparse bodies as an early warning.
+- **GRPO on a T4 is bounded by sequence length, not batch size or step count** (2026-08-24
+  session, three OOMs). SDPA falls back to the math path under GRPO's completion mask, so it
+  materialises the full `(batch, heads, seq, seq)` score matrix. Gradient checkpointing does not
+  help — it bounds how many layers are held, not how big one layer is. The fatal run died in
+  `backward()` at step 30 asking for exactly `8 x 9 x 3654^2 x 4 bytes = 3.58 GiB` on the
+  3014-token prompt. `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` did not help and the
+  traceback proves why: only 157 MiB was reserved-but-unallocated, so there was nothing to
+  defragment. `grpo.py` now runs a CPU pre-flight (`--dry-run`) that computes this spike from the
+  tokenised dataset, drops rows over the cap, and refuses to start if that exceeds a quarter of
+  them. At batch 8 / `max_completion=768` the cap is 1596 prompt tokens and keeps 89/99 rows;
+  `max_completion=512` keeps 94/99. Batch 16 (`--prompts-per-step 2`) is rejected outright — it
+  OOMed on the very first step.
+- **`save_strategy="no"` cost 29 steps of good training.** The crash killed the process before
+  `trainer.save_model()` ran, so a run that had trained cleanly for 30 steps produced nothing.
+  Periodic saving is back as `--save-steps` (default 10, weights only, `save_total_limit=2`).
+  This does not revive reward-based checkpoint *selection*, which was removed for good reasons —
+  it is only about surviving a crash inside a fixed GPU window.
+- **`lr=1e-5` does not move this policy in a run that fits the window.** `kl` sat at 0.0031-0.0041
+  across 29 steps — the policy stayed essentially identical to `digest-sft3`, so even a clean
+  40-step run could not have produced a measurable delta. The conservative LR was chosen because
+  the first GRPO run collapsed at a higher rate, but that run had 4 generations, a binary format
+  gate and 50-88% truncation; none of that describes the current setup (`reward_std` 0.23, zero
+  truncation, `beta=0.1`). Treat the LR as the next thing to change, the way it was for `sft3`.
+- **The reward saturates rather than being gamed.** `fuzz_reward.py` passes clean (317 adversarial
+  inputs, 0 violations) and the teacher's own labels average 0.978, so 1.000 spotchecks are the
+  ceiling being reachable, not the scorer being exploited. But `frac_reward_zero_std` hit 1 on 2
+  of the first 10 steps: on easy days all 8 rollouts score exactly 1.000 and the group contributes
+  no gradient. Raising the ceiling (uncapped grounding, activity-weighted coverage, or
+  teacher-relative targets) is worth more than making the scorer harsher.
+- Rollout spread on the *training* set is healthy and was never the problem: probing the five
+  hardest rows at GRPO's own sampling settings gave mean within-group std `0.247` with `0/5` flat
+  groups, against `0.109` and `1/3` on the held-out rows (`scripts/probe_rollouts.py`).
 
 ## Reward hardening (pre-GRPO session)
 
@@ -198,8 +230,14 @@ notebook records what actually ran.
 - [usr-wwelsh/digest-sft2](https://huggingface.co/usr-wwelsh/digest-sft2) — SFT checkpoint, mean reward
   0.499 on held-out eval. **Stale**: trained on message-only prompts, predates the diff-aware
   dataset fix (see Known issues). Superseded once `digest-sft3` lands.
-- GRPO checkpoint is not yet published — two runs so far collapsed/gamed the reward (see Known
-  issues); will publish once a run on the diff-aware `sft3` baseline beats it.
+- [usr-wwelsh/digest-grpo](https://huggingface.co/usr-wwelsh/digest-grpo) — **stale**, published
+  2026-08-24 at revision `1cb58df` from a GRPO run on top of `digest-sft2`, which collapsed into
+  looping identical commit-sha sections. Its card advertises `0.4060` against an sft2 baseline of
+  `0.2634`; both came from the superseded scorer at `max_new=400` with a repetition penalty and
+  are not comparable to anything in the ladder above. The repo also still holds four
+  `checkpoint-N/` directories (~1.1GB) from that run. `colab/digest_grpo_colab.ipynb` overwrites
+  `main` and deletes those the next time a run beats its baseline; the old revision stays
+  pinnable either way.
 
 ## Next steps
 
