@@ -1,5 +1,35 @@
 # digest-finetune
 
+## Postmortem (2026-08-25): dead end, not pursuing further
+
+GRPO on `digest-sft3` regressed rather than improved it (`0.6844` vs `sft3`'s `0.8700`,
+matched sampled eval — see Weights) even after the reward had been fuzzed, calibrated, and
+hardened against every exploit found across two separate RL runs. Converting `sft3` to GGUF
+and running best-of-N against it with `reward.py` as a verifier, wired into git-digest, still
+wasn't enough on repos outside the training set.
+
+That's the actual finding: a rising reward score was never proof the task was solvable at this
+size. Writing a digest from commits + diffs requires inferring what the rest of the repo does —
+what it's for, how the pieces relate — from a truncated diff and a commit message. A 135M model
+can match the vocabulary and structure of the ~100 repos it trained on; it has no spare capacity
+to generalize that inference to a repo it has never seen, and produces fluent, ungrounded
+confabulation instead. `sft3` is a very good fit to this project's reward function. That was
+never the same thing as a model that can write a truthful digest for an arbitrary repo, and no
+amount of RL or dialing in the reward further was going to close that gap.
+
+Real fix: don't ask a language model to infer facts it was never shown. git-digest is getting a
+`--static` mode (commits/diffs → extracted facts → summary templates, no model, no network
+beyond GitHub, no hallucination). It generalizes to any repo for free, which the finetuning
+route structurally cannot.
+
+This repo is frozen as reference, not deleted: the reward-hardening methodology (fuzzing,
+teacher calibration, grounding-exploit fixes) and the GRPO divergence/abort-guard work below
+generalize past this specific dead end even though the model they were built around doesn't
+belong in git-digest's release path. The goal was always automated codeblog generation, not
+finetuning this specific model — static analysis solves that goal, distillation didn't.
+
+---
+
 Distill the Claude-written daily digests from [git-digest](https://github.com/usr-wwelsh/git-digest) into
 [SmolLM2-135M-Instruct](https://huggingface.co/HuggingFaceTB/SmolLM2-135M-Instruct)
 so digest writing runs offline on CPU — eventually bundled into git-digest itself.
